@@ -119,9 +119,17 @@ export default function Home() {
   const [commitMessage, setCommitMessage] = useState("");
   const [committing, setCommitting] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  const [newBranchName, setNewBranchName] = useState("");
+  const [creatingBranch, setCreatingBranch] = useState(false);
+  const [prTitle, setPrTitle] = useState("");
+  const [prBody, setPrBody] = useState("");
+  const [prHeadBranch, setPrHeadBranch] = useState("");
+  const [creatingPull, setCreatingPull] = useState(false);
+  const [mergingNumber, setMergingNumber] = useState<number | null>(null);
   const [repositoryError, setRepositoryError] = useState("");
   const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
-  const sync = useRoomSync(roomSlug(activeFile), activeContent);
+  const sync = useRoomSync(roomSlug(`${repository?.branch ?? "main"}:${activeFile}`), activeContent);
   const audio = useAudioRoom("synapse-ai", sync.selfId, sync.presence);
   const tree = useMemo(() => buildTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
   const messages = [
@@ -135,6 +143,8 @@ export default function Home() {
     })),
   ];
   const actualPeers = Math.max(1, sync.presence.length);
+  const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
+  const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -189,6 +199,105 @@ export default function Home() {
     }
   }
 
+  function applyRepository(snapshot: RepositorySnapshot) {
+    setRepository(snapshot);
+    setWorkingFiles({});
+    setRepositoryError("");
+    setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
+  }
+
+  async function switchBranch(branch: string) {
+    if (!repository || branch === repository.branch) {
+      setBranchMenuOpen(false);
+      return;
+    }
+    if (dirtyPaths.size) {
+      flash("Commit your working changes before switching branches");
+      return;
+    }
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}?branch=${encodeURIComponent(branch)}`, { cache: "no-store" });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Branch could not be loaded");
+      applyRepository(result);
+      setBranchMenuOpen(false);
+      setHistoryOpen(false);
+      setActiveNav("Code");
+      flash(`Switched to ${branch}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Branch could not be loaded");
+    }
+  }
+
+  async function createBranch(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !newBranchName.trim() || creatingBranch) return;
+    if (dirtyPaths.size) {
+      flash("Commit your working changes before creating a branch");
+      return;
+    }
+    setCreatingBranch(true);
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/branches`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newBranchName, fromBranch: repository.branch, expectedHeadOid: repository.headOid }),
+      });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Branch could not be created");
+      applyRepository(result);
+      setNewBranchName("");
+      setBranchMenuOpen(false);
+      flash(`Created and switched to ${result.branch}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Branch could not be created");
+    } finally {
+      setCreatingBranch(false);
+    }
+  }
+
+  async function createPullRequest(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !pullHeadBranch || creatingPull) return;
+    setCreatingPull(true);
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/pulls`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: prTitle, body: prBody, headBranch: pullHeadBranch, baseBranch: repository.defaultBranch, author: "Achal Sood" }),
+      });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Pull request could not be created");
+      applyRepository(result);
+      setPrTitle("");
+      setPrBody("");
+      setPrHeadBranch("");
+      flash(`Opened pull request #${result.pullRequests[0]?.number ?? ""}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Pull request could not be created");
+    } finally {
+      setCreatingPull(false);
+    }
+  }
+
+  async function mergePullRequest(number: number) {
+    if (!repository || mergingNumber !== null) return;
+    setMergingNumber(number);
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/pulls/${number}/merge`, { method: "POST" });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Pull request could not be merged");
+      applyRepository(result);
+      flash(`Merged pull request #${number} into ${result.branch}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Pull request could not be merged");
+    } finally {
+      setMergingNumber(null);
+    }
+  }
+
   function sendMessage(event: FormEvent) {
     event.preventDefault();
     const body = draft.trim();
@@ -207,9 +316,16 @@ export default function Home() {
       <header className="topbar">
         <a className="brand" href="#" aria-label="MeshForge home"><span className="brand-mark"><span /></span><strong>MeshForge</strong></a>
         <button className="repo-select"><span className="repo-cube">◇</span><strong>{repository?.name ?? "synapse-ai"}</strong><Icon name="chevron" size={14} /></button>
-        <button className="branch-pill"><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span></button>
+        <div className="branch-control">
+          <button className="branch-pill" onClick={() => setBranchMenuOpen((open) => !open)} aria-expanded={branchMenuOpen}><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span><Icon name="chevron" size={12}/></button>
+          {branchMenuOpen && <div className="branch-menu">
+            <header><strong>Switch branches</strong><span>{repository?.branches.length ?? 0} total</span></header>
+            <div className="branch-list">{repository?.branches.map((branch) => <button key={branch.name} className={branch.name === repository.branch ? "active" : ""} onClick={() => void switchBranch(branch.name)}><Icon name="branch" size={14}/><span>{branch.name}</span><code>{branch.shortOid}</code>{branch.isDefault && <em>default</em>}</button>)}</div>
+            <form onSubmit={createBranch}><input value={newBranchName} onChange={(event) => setNewBranchName(event.target.value)} placeholder="feat/branch-name" aria-label="New branch name"/><button disabled={!newBranchName.trim() || creatingBranch}><Icon name="plus" size={14}/>{creatingBranch ? "Creating…" : "New branch"}</button></form>
+          </div>}
+        </div>
         <nav className="nav-tabs" aria-label="Repository navigation">
-          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => setActiveNav(item)}>{item}</button>)}
+          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => { setActiveNav(item); setBranchMenuOpen(false); if (item === "Pull requests") setHistoryOpen(false); }}>{item}{item === "Pull requests" && openPulls > 0 && <span className="nav-count">{openPulls}</span>}</button>)}
         </nav>
         <div className="top-presence" aria-label={`${actualPeers} realtime peers online`}>
           {(sync.presence.length ? sync.presence : [{ clientId: "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => <span className={`avatar sm ${person.color}`} key={person.clientId}>{person.name.slice(0, 2).toUpperCase()}<i /></span>)}
@@ -262,10 +378,33 @@ export default function Home() {
           {historyOpen && <aside className="history-drawer" aria-label="Commit history">
             <header><div><Icon name="git"/><div><strong>Commit history</strong><span>{repository?.branch ?? "main"} · immutable DAG</span></div></div><button onClick={() => setHistoryOpen(false)} aria-label="Close history">×</button></header>
             <div className="history-list">{repository?.history.map((commit, index) => <article key={commit.oid} className={index === 0 ? "head" : ""}>
-              <div className="commit-node"><i/><span/></div><div className="commit-body"><div><strong>{commit.message}</strong>{index === 0 && <em>HEAD</em>}</div><p>{commit.author} · {new Date(commit.createdAt).toLocaleString()}</p><code>{commit.shortOid}</code><span className="diff-total">+{commit.insertions} −{commit.deletions}</span>
+              <div className="commit-node"><i/><span/></div><div className="commit-body"><div><strong>{commit.message}</strong>{index === 0 && <em>HEAD</em>}{commit.secondParentOid && <em className="merge-label">MERGE</em>}</div><p>{commit.author} · {new Date(commit.createdAt).toLocaleString()}</p><code>{commit.shortOid}</code><span className="diff-total">+{commit.insertions} −{commit.deletions}</span>
               {commit.diffs.length > 0 && <details><summary>{commit.filesChanged} {commit.filesChanged === 1 ? "file" : "files"} changed</summary>{commit.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
               </div></article>)}</div>
             <footer><span>{repository?.metrics.objectCount ?? 0} objects</span><span>{repository?.metrics.deduplicatedBytes ?? 0} bytes deduplicated</span></footer>
+          </aside>}
+          {activeNav === "Pull requests" && <aside className="pull-drawer" aria-label="Pull requests">
+            <header><div><Icon name="git"/><div><strong>Pull requests</strong><span>Review snapshots and merge guarded changes</span></div></div><button onClick={() => setActiveNav("Code")} aria-label="Close pull requests">×</button></header>
+            <div className="pull-content">
+              <form className="pull-form" onSubmit={createPullRequest}>
+                <div><strong>Open a pull request</strong><span>Compare a feature branch against {repository?.defaultBranch ?? "main"}</span></div>
+                <label><span>Head branch</span><select value={pullHeadBranch} onChange={(event) => setPrHeadBranch(event.target.value)} disabled={!repository?.branches.some((branch) => !branch.isDefault)}><option value="">Create a feature branch first</option>{repository?.branches.filter((branch) => !branch.isDefault).map((branch) => <option value={branch.name} key={branch.name}>{branch.name} · {branch.shortOid}</option>)}</select></label>
+                <label><span>Title</span><input value={prTitle} onChange={(event) => setPrTitle(event.target.value)} placeholder="Describe the change" maxLength={160}/></label>
+                <label><span>Description</span><textarea value={prBody} onChange={(event) => setPrBody(event.target.value)} placeholder="What changed, and why?" maxLength={2000}/></label>
+                <button disabled={!pullHeadBranch || creatingPull}>{creatingPull ? "Opening…" : "Open pull request"}</button>
+              </form>
+              <section className="pull-list">
+                <div className="pull-list-title"><strong>Repository activity</strong><span>{repository?.pullRequests.length ?? 0} total</span></div>
+                {repository?.pullRequests.length ? repository.pullRequests.map((pull) => <article className={`pull-card ${pull.status}`} key={pull.number}>
+                  <div className="pull-card-top"><span className={`pull-status ${pull.status}`}>{pull.status}</span><code>#{pull.number}</code><span>{pull.headBranch}</span><b>→</b><span>{pull.baseBranch}</span></div>
+                  <h3>{pull.title}</h3>{pull.body && <p>{pull.body}</p>}
+                  <div className="pull-meta"><span>{pull.author} · {new Date(pull.createdAt).toLocaleString()}</span><strong>{pull.filesChanged} files</strong><em>+{pull.insertions} −{pull.deletions}</em></div>
+                  {pull.diffs.length > 0 && <details><summary>View changed files</summary>{pull.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
+                  {pull.status === "open" && <footer><span>{pull.mergeable ? "Base is unchanged · ready to merge" : "Base moved · rebase required"}</span><button disabled={!pull.mergeable || mergingNumber !== null} onClick={() => void mergePullRequest(pull.number)}>{mergingNumber === pull.number ? "Merging…" : "Merge pull request"}</button></footer>}
+                  {pull.status === "merged" && <footer className="merged-footer"><span>Merged {pull.mergedAt ? new Date(pull.mergedAt).toLocaleString() : ""}</span><code>{pull.mergeCommitOid?.slice(0, 8)}</code></footer>}
+                </article>) : <div className="empty-pulls"><Icon name="branch" size={30}/><strong>No pull requests yet</strong><span>Create a feature branch, commit a change, then open your first review.</span></div>}
+              </section>
+            </div>
           </aside>}
         </section>
 

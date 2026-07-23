@@ -3,7 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
-import { commitRepository, getRepositorySnapshot } from "../lib/server/repository-store";
+import { commitRepository, createRepositoryBranch, createRepositoryPullRequest, getRepositorySnapshot, mergeRepositoryPullRequest } from "../lib/server/repository-store";
 import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
 
 interface Env {
@@ -120,6 +120,34 @@ async function handleRepository(request: Request, env: Env, owner: string, name:
   }
 }
 
+async function handleRepositoryBranches(request: Request, env: Env, owner: string, name: string): Promise<Response> {
+  try {
+    if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+    const input = await request.json() as Parameters<typeof createRepositoryBranch>[3];
+    return Response.json(await createRepositoryBranch(env.DB, owner, name, input), { status: 201 });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Branch request failed";
+    return Response.json({ error: message }, { status: message.includes("moved") ? 409 : 400 });
+  }
+}
+
+async function handlePullRequests(request: Request, env: Env, owner: string, name: string, number?: number, merge = false): Promise<Response> {
+  try {
+    if (request.method === "GET" && !number) return Response.json(await getRepositorySnapshot(env.DB, owner, name));
+    if (request.method === "POST" && !number) {
+      const input = await request.json() as Parameters<typeof createRepositoryPullRequest>[3];
+      return Response.json(await createRepositoryPullRequest(env.DB, owner, name, input), { status: 201 });
+    }
+    if (request.method === "POST" && number && merge) {
+      return Response.json(await mergeRepositoryPullRequest(env.DB, owner, name, number), { status: 201 });
+    }
+    return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Pull request failed";
+    return Response.json({ error: message }, { status: message.includes("moved") || message.includes("rebase") ? 409 : message.includes("not found") ? 404 : 400 });
+  }
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -140,6 +168,12 @@ const worker = {
 
     const signalMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/signals$/i);
     if (signalMatch) return handleAudioSignals(request, env, signalMatch[1]);
+
+    const branchMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/branches$/i);
+    if (branchMatch) return handleRepositoryBranches(request, env, branchMatch[1], branchMatch[2]);
+
+    const pullMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/pulls(?:\/(\d+)(\/merge)?)?$/i);
+    if (pullMatch) return handlePullRequests(request, env, pullMatch[1], pullMatch[2], pullMatch[3] ? Number(pullMatch[3]) : undefined, Boolean(pullMatch[4]));
 
     const repositoryMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)(\/commits)?$/i);
     if (repositoryMatch) return handleRepository(request, env, repositoryMatch[1], repositoryMatch[2], Boolean(repositoryMatch[3]));

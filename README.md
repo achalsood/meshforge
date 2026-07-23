@@ -18,6 +18,7 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Repository explorer and source editor
 - D1-backed repositories with SHA-256 content-addressed blobs, immutable tree snapshots, branch refs, and commit DAG history
 - Optimistic branch-head checks and Myers line-diff statistics for each commit
+- Branch creation and switching, pull-request snapshots, changed-file review, and guarded merge commits with two parents
 - Editable shared source document with room-scoped presence and cursor offsets
 - WebSocket fast path with durable replay and polling recovery
 - Voice-room controls and speaking state
@@ -53,7 +54,7 @@ This structure avoids repeatedly scanning the entire document when translating b
 
 1. **Experience prototype** — current interactive workspace.
 2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
-3. **Source management** — implemented repository snapshots, content-addressed objects, branch refs, commits, diffs, deduplication metrics, and stale-head protection. Next: multiple repositories, branch creation, pull requests, and permissions.
+3. **Source management** — implemented repository snapshots, content-addressed objects, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, deduplication metrics, and stale-base protection. Next: multiple repositories, conflict-aware rebasing, review comments, and permissions.
 4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
 5. **AI review** — repository-aware retrieval, structured patch generation, sandboxed validation, eval harness.
 6. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.

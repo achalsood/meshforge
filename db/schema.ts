@@ -66,6 +66,7 @@ export const repoCommits = sqliteTable("repo_commits", {
   repositoryId: integer("repository_id").notNull(),
   treeOid: text("tree_oid").notNull(),
   parentOid: text("parent_oid"),
+  secondParentOid: text("second_parent_oid"),
   message: text("message").notNull(),
   author: text("author").notNull(),
   createdAt: integer("created_at").notNull(),
@@ -88,3 +89,24 @@ export const repoRefs = sqliteTable("repo_refs", {
   commitOid: text("commit_oid").notNull(),
   updatedAt: integer("updated_at").notNull(),
 }, (table) => [primaryKey({ columns: [table.repositoryId, table.name] })]);
+
+export const repoPullRequests = sqliteTable("repo_pull_requests", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  repositoryId: integer("repository_id").notNull(),
+  number: integer("number").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull().default(""),
+  headBranch: text("head_branch").notNull(),
+  baseBranch: text("base_branch").notNull(),
+  headOid: text("head_oid").notNull(),
+  baseOid: text("base_oid").notNull(),
+  status: text("status", { enum: ["open", "merged", "closed"] }).notNull().default("open"),
+  author: text("author").notNull(),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  mergedAt: integer("merged_at"),
+  mergeCommitOid: text("merge_commit_oid"),
+}, (table) => [
+  uniqueIndex("repo_pull_requests_repo_number_unique").on(table.repositoryId, table.number),
+  index("repo_pull_requests_repo_status_idx").on(table.repositoryId, table.status),
+]);

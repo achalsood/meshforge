@@ -16,7 +16,7 @@
 | Realtime gateway | Upgrade sockets, validate batches, route by room | WebSocket edge worker (implemented) |
 | Room coordinator | Order broadcasts, retain hot state, issue snapshots | Durable stateful worker |
 | Collaboration core | RGA operations, dependency queues, replay, compaction | TypeScript library (core implemented) |
-| Repository service | Content-addressed blobs and trees, commit DAGs, refs, diffs | Worker API + D1 (foundation implemented) |
+| Repository service | Content-addressed blobs and trees, commit DAGs, refs, pull requests, diffs | Worker API + D1 (implemented) |
 | Media plane | Audio transport, short-lived signaling, mute state, and active-speaker metering | WebRTC mesh + HTTP signaling (implemented); SFU at scale |
 | AI patch service | Context selection, inference, diff validation | Retrieval pipeline + sandbox worker |
 
@@ -36,7 +36,7 @@ A version vector stores the highest contiguous sequence observed per replica. De
 
 ### Repository objects
 
-File blobs, trees, and commits use typed, length-prefixed SHA-256 identifiers. Primary-key lookup gives expected `O(1)` deduplication; immutable commit parent links form a DAG. Branch updates include an expected-head check so concurrent writers cannot silently overwrite one another. Line statistics use Myers shortest edit path in `O((N + M)D)` time and `O(N + M)` space rather than an `O(NM)` matrix.
+File blobs, trees, and commits use typed, length-prefixed SHA-256 identifiers. Primary-key lookup gives expected `O(1)` deduplication; immutable commit parent links form a DAG. Normal commits have one parent and merge commits preserve both base and feature heads. Branch updates include an expected-head check so concurrent writers cannot silently overwrite one another. A pull request records the reviewed base object ID and rejects the merge if that base moves, preventing stale review state from being applied. Line statistics use Myers shortest edit path in `O((N + M)D)` time and `O(N + M)` space rather than an `O(NM)` matrix.
 
 ### Presence and fan-out
 

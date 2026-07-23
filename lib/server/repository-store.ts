@@ -1,6 +1,7 @@
 import { myersDiffStats } from "../repository/myers-diff";
+import { pullRequestMergeability } from "../repository/merge-policy";
 import { repositoryObjectId, utf8Bytes } from "../repository/object-id";
-import type { FileDiff, RepositoryCommit, RepositoryFile, RepositorySnapshot } from "../repository/types";
+import type { FileDiff, PullRequest, RepositoryBranch, RepositoryCommit, RepositoryFile, RepositorySnapshot } from "../repository/types";
 
 const INITIAL_FILES = [
   {
@@ -93,6 +94,7 @@ export async function ensureRepositorySchema(db: D1Database): Promise<void> {
         repository_id INTEGER NOT NULL,
         tree_oid TEXT NOT NULL,
         parent_oid TEXT,
+        second_parent_oid TEXT,
         message TEXT NOT NULL,
         author TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -116,6 +118,25 @@ export async function ensureRepositorySchema(db: D1Database): Promise<void> {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY(repository_id, name)
       )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repo_pull_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository_id INTEGER NOT NULL,
+        number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        head_branch TEXT NOT NULL,
+        base_branch TEXT NOT NULL,
+        head_oid TEXT NOT NULL,
+        base_oid TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        author TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        merged_at INTEGER,
+        merge_commit_oid TEXT,
+        UNIQUE(repository_id, number)
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repo_pull_requests_repo_status_idx ON repo_pull_requests (repository_id, status)"),
     ]).then(() => undefined).catch((error) => {
       repositorySchemaReady = null;
       throw error;
@@ -143,11 +164,26 @@ async function filesAtCommit(db: D1Database, commitOid: string | null): Promise<
   return (result.results ?? []).map((row) => ({ path: row.path, oid: row.oid, content: row.content, size: row.size }));
 }
 
-async function createSnapshotCommit(db: D1Database, repository: RepositoryRow, branch: string, author: string, message: string, inputFiles: Array<{ path: string; content: string }>): Promise<string> {
+function calculateDiffs(beforeFiles: RepositoryFile[], afterFiles: Array<{ path: string; content: string }>): FileDiff[] {
+  const before = new Map(beforeFiles.map((file) => [file.path, file.content]));
+  const after = new Map(afterFiles.map((file) => [file.path, file.content]));
+  const paths = new Set([...before.keys(), ...after.keys()]);
+  const diffs: FileDiff[] = [];
+  for (const path of [...paths].sort()) {
+    const previous = before.get(path);
+    const next = after.get(path);
+    if (previous === next) continue;
+    const stats = myersDiffStats(previous ?? "", next ?? "");
+    diffs.push({ path, status: previous === undefined ? "added" : next === undefined ? "deleted" : "modified", ...stats });
+  }
+  return diffs;
+}
+
+async function createSnapshotCommit(db: D1Database, repository: RepositoryRow, branch: string, author: string, message: string, inputFiles: Array<{ path: string; content: string }>, secondParentOid: string | null = null, expectedHeadOid?: string): Promise<string> {
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
+  if (expectedHeadOid && head?.commit_oid !== expectedHeadOid) throw new Error("Base branch moved; rebase before merging");
   const previousFiles = await filesAtCommit(db, head?.commit_oid ?? null);
-  const previous = new Map(previousFiles.map((file) => [file.path, file]));
   const normalized = [...inputFiles]
     .map((file) => ({ path: file.path.replace(/^\/+/, "").slice(0, 240), content: file.content }))
     .filter((file) => file.path && !file.path.includes(".."))
@@ -173,26 +209,17 @@ async function createSnapshotCommit(db: D1Database, repository: RepositoryRow, b
       VALUES (?, ?, ?, ?) ON CONFLICT(tree_oid, path) DO NOTHING`).bind(treeOid, entry.path, entry.oid, entry.size));
   }
 
-  const next = new Map(normalized.map((file) => [file.path, file.content]));
-  const paths = new Set([...previous.keys(), ...next.keys()]);
-  const diffs: FileDiff[] = [];
-  for (const path of [...paths].sort()) {
-    const before = previous.get(path)?.content;
-    const after = next.get(path);
-    if (before === after) continue;
-    const stats = myersDiffStats(before ?? "", after ?? "");
-    diffs.push({ path, status: before === undefined ? "added" : after === undefined ? "deleted" : "modified", ...stats });
-  }
+  const diffs = calculateDiffs(previousFiles, normalized);
   const insertions = diffs.reduce((sum, diff) => sum + diff.insertions, 0);
   const deletions = diffs.reduce((sum, diff) => sum + diff.deletions, 0);
-  const commitContent = JSON.stringify({ treeOid, parentOid: head?.commit_oid ?? null, author, message, createdAt: now });
+  const commitContent = JSON.stringify({ treeOid, parentOids: [head?.commit_oid ?? null, secondParentOid].filter(Boolean), author, message, createdAt: now });
   const commitOid = await repositoryObjectId("commit", commitContent);
   statements.push(db.prepare(`INSERT INTO repo_objects (oid, object_type, content, size, created_at)
     VALUES (?, 'commit', ?, ?, ?) ON CONFLICT(oid) DO NOTHING`).bind(commitOid, commitContent, utf8Bytes(commitContent), now));
   statements.push(db.prepare(`INSERT INTO repo_commits
-    (oid, repository_id, tree_oid, parent_oid, message, author, created_at, files_changed, insertions, deletions)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(oid) DO NOTHING`)
-    .bind(commitOid, repository.id, treeOid, head?.commit_oid ?? null, message.slice(0, 160), author.slice(0, 80), now, diffs.length, insertions, deletions));
+    (oid, repository_id, tree_oid, parent_oid, second_parent_oid, message, author, created_at, files_changed, insertions, deletions)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(oid) DO NOTHING`)
+    .bind(commitOid, repository.id, treeOid, head?.commit_oid ?? null, secondParentOid, message.slice(0, 160), author.slice(0, 80), now, diffs.length, insertions, deletions));
   for (const diff of diffs) {
     statements.push(db.prepare(`INSERT INTO repo_commit_diffs (commit_oid, path, status, insertions, deletions)
       VALUES (?, ?, ?, ?, ?) ON CONFLICT(commit_oid, path) DO NOTHING`)
@@ -219,9 +246,9 @@ async function ensureSeedRepository(db: D1Database, owner: string, name: string)
 }
 
 async function loadHistory(db: D1Database, repositoryId: number): Promise<RepositoryCommit[]> {
-  const commits = await db.prepare(`SELECT oid, tree_oid, parent_oid, message, author, created_at, files_changed, insertions, deletions
+  const commits = await db.prepare(`SELECT oid, tree_oid, parent_oid, second_parent_oid, message, author, created_at, files_changed, insertions, deletions
     FROM repo_commits WHERE repository_id = ? ORDER BY created_at DESC LIMIT 20`).bind(repositoryId).all<{
-      oid: string; tree_oid: string; parent_oid: string | null; message: string; author: string; created_at: number;
+      oid: string; tree_oid: string; parent_oid: string | null; second_parent_oid: string | null; message: string; author: string; created_at: number;
       files_changed: number; insertions: number; deletions: number;
     }>();
   const diffResult = await db.prepare(`SELECT d.commit_oid, d.path, d.status, d.insertions, d.deletions
@@ -236,12 +263,62 @@ async function loadHistory(db: D1Database, repositoryId: number): Promise<Reposi
   const history: RepositoryCommit[] = [];
   for (const row of commits.results ?? []) {
     history.push({
-      oid: row.oid, shortOid: row.oid.slice(0, 8), parentOid: row.parent_oid, treeOid: row.tree_oid,
+      oid: row.oid, shortOid: row.oid.slice(0, 8), parentOid: row.parent_oid, secondParentOid: row.second_parent_oid, treeOid: row.tree_oid,
       message: row.message, author: row.author, createdAt: row.created_at, filesChanged: row.files_changed,
       insertions: row.insertions, deletions: row.deletions, diffs: diffsByCommit.get(row.oid) ?? [],
     });
   }
   return history;
+}
+
+interface BranchRow { name: string; commit_oid: string; updated_at: number; }
+
+async function loadBranches(db: D1Database, repository: RepositoryRow): Promise<RepositoryBranch[]> {
+  const result = await db.prepare(`SELECT name, commit_oid, updated_at FROM repo_refs
+    WHERE repository_id = ? ORDER BY CASE WHEN name = ? THEN 0 ELSE 1 END, name`)
+    .bind(repository.id, repository.default_branch).all<BranchRow>();
+  return (result.results ?? []).map((row) => ({
+    name: row.name,
+    headOid: row.commit_oid,
+    shortOid: row.commit_oid.slice(0, 8),
+    updatedAt: row.updated_at,
+    isDefault: row.name === repository.default_branch,
+  }));
+}
+
+interface PullRequestRow {
+  number: number; title: string; body: string; head_branch: string; base_branch: string;
+  head_oid: string; base_oid: string; status: "open" | "merged" | "closed"; author: string;
+  created_at: number; merged_at: number | null; merge_commit_oid: string | null;
+}
+
+async function loadPullRequests(db: D1Database, repository: RepositoryRow, branches: RepositoryBranch[]): Promise<PullRequest[]> {
+  const result = await db.prepare(`SELECT number, title, body, head_branch, base_branch, head_oid, base_oid,
+    status, author, created_at, merged_at, merge_commit_oid FROM repo_pull_requests
+    WHERE repository_id = ? ORDER BY number DESC LIMIT 30`).bind(repository.id).all<PullRequestRow>();
+  const heads = new Map(branches.map((branch) => [branch.name, branch.headOid]));
+  const fileCache = new Map<string, RepositoryFile[]>();
+  const at = async (oid: string) => {
+    if (!fileCache.has(oid)) fileCache.set(oid, await filesAtCommit(db, oid));
+    return fileCache.get(oid) ?? [];
+  };
+  const pullRequests: PullRequest[] = [];
+  for (const row of result.results ?? []) {
+    const headOid = row.status === "open" ? heads.get(row.head_branch) ?? row.head_oid : row.head_oid;
+    const currentBaseOid = row.status === "open" ? heads.get(row.base_branch) ?? row.base_oid : row.base_oid;
+    const diffs = calculateDiffs(await at(currentBaseOid), await at(headOid));
+    pullRequests.push({
+      number: row.number, title: row.title, body: row.body, headBranch: row.head_branch, baseBranch: row.base_branch,
+      headOid, baseOid: currentBaseOid, status: row.status, author: row.author, createdAt: row.created_at,
+      mergedAt: row.merged_at, mergeCommitOid: row.merge_commit_oid,
+      mergeable: pullRequestMergeability({ status: row.status, openedBaseOid: row.base_oid, currentBaseOid, currentHeadOid: headOid }).mergeable,
+      filesChanged: diffs.length,
+      insertions: diffs.reduce((sum, diff) => sum + diff.insertions, 0),
+      deletions: diffs.reduce((sum, diff) => sum + diff.deletions, 0),
+      diffs,
+    });
+  }
+  return pullRequests;
 }
 
 export async function getRepositorySnapshot(db: D1Database, owner: string, name: string, branch = "main"): Promise<RepositorySnapshot> {
@@ -251,6 +328,8 @@ export async function getRepositorySnapshot(db: D1Database, owner: string, name:
   if (!head) throw new Error("Branch not found");
   const files = await filesAtCommit(db, head.commit_oid);
   const history = await loadHistory(db, repository.id);
+  const branches = await loadBranches(db, repository);
+  const pullRequests = await loadPullRequests(db, repository, branches);
   const objectMetrics = await db.prepare(`SELECT
     (SELECT COUNT(*) FROM repo_commits WHERE repository_id = ?) +
     (SELECT COUNT(DISTINCT tree_oid) FROM repo_commits WHERE repository_id = ?) +
@@ -265,7 +344,7 @@ export async function getRepositorySnapshot(db: D1Database, owner: string, name:
   const storedBytes = Number(objectMetrics?.stored_bytes ?? logicalBytes);
   return {
     owner: repository.owner, name: repository.name, defaultBranch: repository.default_branch, branch,
-    headOid: head.commit_oid, files, history,
+    headOid: head.commit_oid, files, history, branches, pullRequests,
     metrics: {
       objectCount: Number(objectMetrics?.object_count ?? 0),
       uniqueBlobCount: Number(objectMetrics?.unique_blob_count ?? 0),
@@ -274,6 +353,78 @@ export async function getRepositorySnapshot(db: D1Database, owner: string, name:
       deduplicatedBytes: Math.max(0, logicalBytes * Math.max(1, history.length) - storedBytes),
     },
   };
+}
+
+function branchName(value: string): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9._/-]/g, "-").replace(/-{2,}/g, "-").replace(/^[-/.]+|[-/.]+$/g, "").slice(0, 120);
+  if (!normalized) throw new Error("Branch name is required");
+  return normalized;
+}
+
+export async function createRepositoryBranch(db: D1Database, owner: string, name: string, input: {
+  name?: string; fromBranch?: string; expectedHeadOid?: string;
+}): Promise<RepositorySnapshot> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const nextName = branchName(input.name ?? "");
+  const sourceName = branchName(input.fromBranch || repository.default_branch);
+  const source = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
+    .bind(repository.id, sourceName).first<HeadRow>();
+  if (!source) throw new Error("Source branch not found");
+  if (input.expectedHeadOid && input.expectedHeadOid !== source.commit_oid) throw new Error("Source branch moved; reload before branching");
+  const existing = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
+    .bind(repository.id, nextName).first<HeadRow>();
+  if (existing) throw new Error("Branch already exists");
+  await db.prepare("INSERT INTO repo_refs (repository_id, name, commit_oid, updated_at) VALUES (?, ?, ?, ?)")
+    .bind(repository.id, nextName, source.commit_oid, Date.now()).run();
+  return getRepositorySnapshot(db, owner, name, nextName);
+}
+
+export async function createRepositoryPullRequest(db: D1Database, owner: string, name: string, input: {
+  title?: string; body?: string; headBranch?: string; baseBranch?: string; author?: string;
+}): Promise<RepositorySnapshot> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const headBranch = branchName(input.headBranch ?? "");
+  const baseBranch = branchName(input.baseBranch || repository.default_branch);
+  if (headBranch === baseBranch) throw new Error("Pull request branches must be different");
+  const [head, base, duplicate, numberRow] = await Promise.all([
+    db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, headBranch).first<HeadRow>(),
+    db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, baseBranch).first<HeadRow>(),
+    db.prepare("SELECT number FROM repo_pull_requests WHERE repository_id = ? AND head_branch = ? AND base_branch = ? AND status = 'open'").bind(repository.id, headBranch, baseBranch).first<{ number: number }>(),
+    db.prepare("SELECT COALESCE(MAX(number), 0) + 1 next_number FROM repo_pull_requests WHERE repository_id = ?").bind(repository.id).first<{ next_number: number }>(),
+  ]);
+  if (!head || !base) throw new Error("Pull request branch not found");
+  if (head.commit_oid === base.commit_oid) throw new Error("Branches do not contain different commits");
+  if (duplicate) throw new Error(`Pull request #${duplicate.number} is already open`);
+  const now = Date.now();
+  await db.prepare(`INSERT INTO repo_pull_requests
+    (repository_id, number, title, body, head_branch, base_branch, head_oid, base_oid, status, author, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
+    .bind(repository.id, Number(numberRow?.next_number ?? 1), (input.title?.trim() || `Merge ${headBranch} into ${baseBranch}`).slice(0, 160),
+      (input.body ?? "").slice(0, 2000), headBranch, baseBranch, head.commit_oid, base.commit_oid, (input.author || "Achal Sood").slice(0, 80), now, now).run();
+  return getRepositorySnapshot(db, owner, name, headBranch);
+}
+
+export async function mergeRepositoryPullRequest(db: D1Database, owner: string, name: string, number: number, author = "Achal Sood"): Promise<RepositorySnapshot> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const pull = await db.prepare(`SELECT number, title, head_branch, base_branch, head_oid, base_oid, status
+    FROM repo_pull_requests WHERE repository_id = ? AND number = ?`).bind(repository.id, number).first<{
+      number: number; title: string; head_branch: string; base_branch: string; head_oid: string; base_oid: string; status: string;
+    }>();
+  if (!pull) throw new Error("Pull request not found");
+  if (pull.status !== "open") throw new Error("Pull request is not open");
+  const [head, base] = await Promise.all([
+    db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, pull.head_branch).first<HeadRow>(),
+    db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, pull.base_branch).first<HeadRow>(),
+  ]);
+  if (!head || !base) throw new Error("Pull request branch no longer exists");
+  if (base.commit_oid !== pull.base_oid) throw new Error("Base branch moved; rebase before merging");
+  const headFiles = await filesAtCommit(db, head.commit_oid);
+  const mergeOid = await createSnapshotCommit(db, repository, pull.base_branch, author, `Merge pull request #${number}: ${pull.title}`, headFiles, head.commit_oid, pull.base_oid);
+  const now = Date.now();
+  await db.prepare(`UPDATE repo_pull_requests SET status = 'merged', head_oid = ?, merged_at = ?, updated_at = ?, merge_commit_oid = ?
+    WHERE repository_id = ? AND number = ? AND status = 'open'`)
+    .bind(head.commit_oid, now, now, mergeOid, repository.id, number).run();
+  return getRepositorySnapshot(db, owner, name, pull.base_branch);
 }
 
 export async function commitRepository(db: D1Database, owner: string, name: string, input: {
