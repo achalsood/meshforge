@@ -1,6 +1,13 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { ActionsDrawer } from "@/components/workspace/actions-drawer";
+import { CollaborationPanel } from "@/components/workspace/collaboration-panel";
+import { FileTree } from "@/components/workspace/file-tree";
+import { Icon } from "@/components/workspace/icon";
+import { IssuesDrawer } from "@/components/workspace/issues-drawer";
+import { TeamDrawer } from "@/components/workspace/team-drawer";
+import { TelemetryFooter } from "@/components/workspace/telemetry-footer";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
 import { roomSlug } from "@/lib/collaboration/room-id";
@@ -8,42 +15,10 @@ import { chatGPTSignInUrl, chatGPTSignOutUrl, chatGPTSwitchUserUrl } from "@/lib
 import type { RepositoryPermission, RepositoryRole } from "@/lib/auth/permissions";
 import type { RepositoryMember, SessionPayload, TeamPayload } from "@/lib/auth/types";
 import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
-import type { RepositoryIssue, RepositorySnapshot, WorkflowRun } from "@/lib/repository/types";
-
-type IconName =
-  | "branch" | "chevron" | "code" | "search" | "more" | "share"
-  | "folder" | "file" | "git" | "book" | "mic" | "headphones"
-  | "settings" | "phone" | "send" | "sparkles" | "users" | "activity"
-  | "radio" | "check" | "plus" | "panel";
-
-const paths: Record<IconName, string> = {
-  branch: "M6 3v12a4 4 0 0 0 4 4h2M6 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0-14a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm0 0v6a4 4 0 0 1-4 4h-2",
-  chevron: "m9 18 6-6-6-6",
-  code: "m8 9-3 3 3 3m8-6 3 3-3 3m-2-10-4 14",
-  search: "m21 21-4.35-4.35M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
-  more: "M5 12h.01M12 12h.01M19 12h.01",
-  share: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm10-4v6m3-3h-6",
-  folder: "M3 6h6l2 2h10v11H3V6Z",
-  file: "M6 2h8l4 4v16H6V2Zm8 0v5h5",
-  git: "M9 18a3 3 0 1 0-6 0 3 3 0 0 0 6 0Zm12-12a3 3 0 1 0-6 0 3 3 0 0 0 6 0ZM8 16 16 8",
-  book: "M4 5a3 3 0 0 1 3-3h5v19H7a3 3 0 0 0-3 3V5Zm16 0a3 3 0 0 0-3-3h-5v19h5a3 3 0 0 1 3 3V5Z",
-  mic: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 18v4m-4 0h8",
-  headphones: "M4 14v-2a8 8 0 0 1 16 0v2M4 14h3v7H4v-7Zm13 0h3v7h-3v-7Z",
-  settings: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm0-13v2m0 15v2M4.6 4.6 6 6m12 12 1.4 1.4M2.5 12h2m15 0h2M4.6 19.4 6 18M18 6l1.4-1.4",
-  phone: "M6.6 10.8a15.5 15.5 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.24l4 1.34a1 1 0 0 1 .68.95V21a1 1 0 0 1-1 1C10.1 22 2 13.9 2 4a1 1 0 0 1 1-1h3.75a1 1 0 0 1 .95.68l1.34 4a1 1 0 0 1-.24 1l-2.2 2.12Z",
-  send: "m22 2-7 20-4-9-9-4 20-7Zm-11 11 5-5",
-  sparkles: "m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3Zm7 10 .8 2.2L22 16l-2.2.8L19 19l-.8-2.2L16 16l2.2-.8L19 13ZM5 14l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3Z",
-  users: "M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M8.5 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm11.5 10v-2a4 4 0 0 0-3-3.87m-1-12a4 4 0 0 1 0 7.75",
-  activity: "M3 12h4l2-7 4 14 2-7h6",
-  radio: "M5.6 18.4a9 9 0 0 1 0-12.8m12.8 0a9 9 0 0 1 0 12.8M9 15a4 4 0 0 1 0-6m6 0a4 4 0 0 1 0 6m-3-1a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
-  check: "m5 12 4 4L19 6",
-  plus: "M12 5v14M5 12h14",
-  panel: "M3 4h18v16H3V4Zm13 0v16",
-};
-
-function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;
-}
+import type { RepositorySnapshot } from "@/lib/repository/types";
+import { useRepositoryActions } from "@/lib/workspace/use-repository-actions";
+import { useRepositoryIssues } from "@/lib/workspace/use-repository-issues";
+import { buildFileTree } from "@/lib/workspace/build-file-tree";
 
 const INITIAL_CODE = `import { cosineSim, L2Distance } from "../utils/distance";
 import { MaxHeap } from "../utils/heap";
@@ -79,27 +54,6 @@ export class HNSWIndex {
     this.insert(id, vector, level);
   }
 }`;
-
-interface TreeItem { type: "folder-open" | "ts" | "git" | "book" | "file"; name: string; path: string; depth: number; }
-
-function buildTree(paths: string[]): TreeItem[] {
-  const items: TreeItem[] = [];
-  const folders = new Set<string>();
-  for (const path of [...paths].sort()) {
-    const segments = path.split("/");
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const folderPath = segments.slice(0, index + 1).join("/");
-      if (!folders.has(folderPath)) {
-        folders.add(folderPath);
-        items.push({ type: "folder-open", name: segments[index], path: folderPath, depth: index });
-      }
-    }
-    const name = segments.at(-1) ?? path;
-    const type = name === "README.md" ? "book" : name === ".gitignore" ? "git" : /\.(ts|tsx|json)$/.test(name) ? "ts" : "file";
-    items.push({ type, name, path, depth: segments.length - 1 });
-  }
-  return items;
-}
 
 export default function Home() {
   const [session, setSession] = useState<SessionPayload | null>(null);
@@ -141,20 +95,15 @@ export default function Home() {
   const [creatingPull, setCreatingPull] = useState(false);
   const [mergingNumber, setMergingNumber] = useState<number | null>(null);
   const [repositoryError, setRepositoryError] = useState("");
-  const [issues, setIssues] = useState<RepositoryIssue[]>([]);
-  const [issueTitle, setIssueTitle] = useState("");
-  const [issueBody, setIssueBody] = useState("");
-  const [issueLabels, setIssueLabels] = useState("enhancement");
-  const [issueFilter, setIssueFilter] = useState<"open" | "closed" | "all">("open");
-  const [selectedIssueNumber, setSelectedIssueNumber] = useState<number | null>(null);
-  const [issueComment, setIssueComment] = useState("");
-  const [issuesLoading, setIssuesLoading] = useState(false);
-  const [issueMutation, setIssueMutation] = useState(false);
-  const [issueError, setIssueError] = useState("");
-  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
-  const [actionsLoading, setActionsLoading] = useState(false);
-  const [runningWorkflow, setRunningWorkflow] = useState(false);
-  const [actionsError, setActionsError] = useState("");
+  const {
+    addIssueComment, changeIssueStatus, createIssue, filteredIssues, issueBody,
+    issueComment, issueError, issueFilter, issueLabels, issueMutation, issues,
+    issuesLoading, issueTitle, loadIssues, openIssues, selectedIssue, setIssueBody,
+    setIssueComment, setIssueFilter, setIssueLabels, setIssueTitle, setSelectedIssueNumber,
+  } = useRepositoryIssues(repository, activeNav === "Issues", flash);
+  const {
+    actionsError, actionsLoading, loadActions, runWorkflow, runningWorkflow, workflowRuns,
+  } = useRepositoryActions(repository, activeNav === "Actions", flash);
   const currentAccess = session?.repositories.find((candidate) => candidate.owner === repository?.owner && candidate.name === repository?.name);
   const can = (permission: RepositoryPermission) => currentAccess?.permissions.includes(permission) ?? false;
   const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
@@ -173,7 +122,7 @@ export default function Home() {
     scope: "audio",
     enabled: can("audio"),
   });
-  const tree = useMemo(() => buildTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
+  const tree = useMemo(() => buildFileTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
   const messages = sync.chats.map((message) => ({
       who: message.name,
       initials: message.initials,
@@ -184,12 +133,7 @@ export default function Home() {
   const actualPeers = Math.max(1, sync.presence.length);
   const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
-  const openIssues = issues.filter((issue) => issue.status === "open").length;
-  const filteredIssues = issues.filter((issue) => issueFilter === "all" || issue.status === issueFilter);
-  const selectedIssue = issues.find((issue) => issue.number === selectedIssueNumber) ?? filteredIssues[0] ?? null;
   const selectedFinding = analysis?.findings.find((finding) => finding.id === selectedFindingId) ?? analysis?.findings[0];
-  const repositoryOwner = repository?.owner;
-  const repositoryName = repository?.name;
 
   useEffect(() => {
     let cancelled = false;
@@ -241,45 +185,6 @@ export default function Home() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [deviceMenuOpen]);
 
-  useEffect(() => {
-    if (!repositoryOwner || !repositoryName || (activeNav !== "Issues" && activeNav !== "Actions")) return;
-    let cancelled = false;
-    const load = async () => {
-      if (activeNav === "Issues") {
-        setIssuesLoading(true);
-        setIssueError("");
-        try {
-          const response = await fetch(`/api/repos/${repositoryOwner}/${repositoryName}/issues`, { cache: "no-store" });
-          const result = await response.json() as RepositoryIssue[] | { error: string };
-          if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issues could not be loaded");
-          if (!cancelled) {
-            setIssues(result);
-            setSelectedIssueNumber((current) => result.some((issue) => issue.number === current) ? current : result[0]?.number ?? null);
-          }
-        } catch (cause) {
-          if (!cancelled) setIssueError(cause instanceof Error ? cause.message : "Issues could not be loaded");
-        } finally {
-          if (!cancelled) setIssuesLoading(false);
-        }
-      } else {
-        setActionsLoading(true);
-        setActionsError("");
-        try {
-          const response = await fetch(`/api/repos/${repositoryOwner}/${repositoryName}/actions`, { cache: "no-store" });
-          const result = await response.json() as WorkflowRun[] | { error: string };
-          if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow runs could not be loaded");
-          if (!cancelled) setWorkflowRuns(result);
-        } catch (cause) {
-          if (!cancelled) setActionsError(cause instanceof Error ? cause.message : "Workflow runs could not be loaded");
-        } finally {
-          if (!cancelled) setActionsLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => { cancelled = true; };
-  }, [activeNav, repositoryOwner, repositoryName]);
-
   const workingSnapshot = repository?.files.map((file) => ({
     path: file.path,
     content: file.path === activeFile ? sync.text : workingFiles[file.path] ?? file.content,
@@ -321,8 +226,6 @@ export default function Home() {
     setRepository(snapshot);
     setWorkingFiles({});
     setRepositoryError("");
-    setIssues([]);
-    setWorkflowRuns([]);
     setTeam(null);
     setTeamOpen(false);
     setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
@@ -545,130 +448,6 @@ export default function Home() {
     }
   }
 
-  async function loadIssues() {
-    if (!repository || issuesLoading) return;
-    setIssuesLoading(true);
-    setIssueError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues`, { cache: "no-store" });
-      const result = await response.json() as RepositoryIssue[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issues could not be loaded");
-      setIssues(result);
-      setSelectedIssueNumber((current) => result.some((issue) => issue.number === current) ? current : result[0]?.number ?? null);
-    } catch (cause) {
-      setIssueError(cause instanceof Error ? cause.message : "Issues could not be loaded");
-    } finally {
-      setIssuesLoading(false);
-    }
-  }
-
-  async function createIssue(event: FormEvent) {
-    event.preventDefault();
-    if (!repository || !issueTitle.trim() || issueMutation) return;
-    setIssueMutation(true);
-    setIssueError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: issueTitle, body: issueBody,
-          labels: issueLabels.split(",").map((label) => label.trim()).filter(Boolean),
-        }),
-      });
-      const result = await response.json() as RepositoryIssue[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issue could not be created");
-      setIssues(result);
-      setIssueTitle("");
-      setIssueBody("");
-      setIssueLabels("enhancement");
-      setIssueFilter("open");
-      setSelectedIssueNumber(result[0]?.number ?? null);
-      flash(`Opened issue #${result[0]?.number ?? ""}`);
-    } catch (cause) {
-      setIssueError(cause instanceof Error ? cause.message : "Issue could not be created");
-    } finally {
-      setIssueMutation(false);
-    }
-  }
-
-  async function changeIssueStatus(issue: RepositoryIssue) {
-    if (!repository || issueMutation) return;
-    setIssueMutation(true);
-    setIssueError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues/${issue.number}`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: issue.status === "open" ? "closed" : "open" }),
-      });
-      const result = await response.json() as RepositoryIssue[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issue could not be updated");
-      setIssues(result);
-      flash(`${issue.status === "open" ? "Closed" : "Reopened"} issue #${issue.number}`);
-    } catch (cause) {
-      setIssueError(cause instanceof Error ? cause.message : "Issue could not be updated");
-    } finally {
-      setIssueMutation(false);
-    }
-  }
-
-  async function addIssueComment(event: FormEvent) {
-    event.preventDefault();
-    if (!repository || !selectedIssue || !issueComment.trim() || issueMutation) return;
-    setIssueMutation(true);
-    setIssueError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues/${selectedIssue.number}/comments`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: issueComment }),
-      });
-      const result = await response.json() as RepositoryIssue[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Comment could not be added");
-      setIssues(result);
-      setIssueComment("");
-      flash(`Commented on issue #${selectedIssue.number}`);
-    } catch (cause) {
-      setIssueError(cause instanceof Error ? cause.message : "Comment could not be added");
-    } finally {
-      setIssueMutation(false);
-    }
-  }
-
-  async function loadActions() {
-    if (!repository || actionsLoading) return;
-    setActionsLoading(true);
-    setActionsError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/actions`, { cache: "no-store" });
-      const result = await response.json() as WorkflowRun[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow runs could not be loaded");
-      setWorkflowRuns(result);
-    } catch (cause) {
-      setActionsError(cause instanceof Error ? cause.message : "Workflow runs could not be loaded");
-    } finally {
-      setActionsLoading(false);
-    }
-  }
-
-  async function runWorkflow() {
-    if (!repository || runningWorkflow) return;
-    setRunningWorkflow(true);
-    setActionsError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/actions`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: repository.branch }),
-      });
-      const result = await response.json() as WorkflowRun[] | { error: string };
-      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow could not be started");
-      setWorkflowRuns(result);
-      flash(`Mesh CI ${result[0]?.status === "success" ? "passed" : "found an issue"}`);
-    } catch (cause) {
-      setActionsError(cause instanceof Error ? cause.message : "Workflow could not be started");
-    } finally {
-      setRunningWorkflow(false);
-    }
-  }
-
   async function runMeshAnalysis() {
     if (!repository || analyzing) return;
     setAnalyzing(true);
@@ -797,15 +576,7 @@ export default function Home() {
         <aside className="explorer panel">
           <div className="panel-heading"><span>Explorer</span><button aria-label="Collapse explorer">↤</button></div>
           <div className="repo-row"><strong>{repository ? `${repository.owner}/${repository.name}` : "No repository selected"}</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
-          <div className="file-tree">
-            {tree.map((item, index) => (
-              <button key={`${item.path}-${index}`} style={{ paddingLeft: 13 + item.depth * 20 }} className={`tree-row ${activeFile === item.path ? "active" : ""}`} onClick={() => !item.type.startsWith("folder") && openFile(item.path)}>
-                {item.type.startsWith("folder") && <span className={`tree-caret ${item.type === "folder-open" ? "open" : ""}`}>›</span>}
-                {item.type === "ts" ? <span className="ts-icon">TS</span> : <Icon name={item.type.startsWith("folder") ? "folder" : item.type as IconName} size={17} />}
-                <span>{item.name}</span>{dirtyPaths.has(item.path) && <em>M</em>}
-              </button>
-            ))}
-          </div>
+          <FileTree activeFile={activeFile} dirtyPaths={dirtyPaths} items={tree} onOpenFile={openFile}/>
           <div className="explorer-foot"><Icon name="branch" size={14} /><span>{dirtyPaths.size} working {dirtyPaths.size === 1 ? "change" : "changes"}</span><span>{repository?.metrics.uniqueBlobCount ?? 0} blobs</span></div>
         </aside>
 
@@ -882,115 +653,78 @@ export default function Home() {
               </section>
             </div>
           </aside>}
-          {activeNav === "Issues" && <aside className="product-drawer issues-drawer" aria-label="Repository issues">
-            <header><div><Icon name="activity"/><div><strong>Issues</strong><span>Track bugs, enhancements, decisions, and follow-up work</span></div></div><button onClick={() => setActiveNav("Code")} aria-label="Close issues">×</button></header>
-            {issueError && <div className="drawer-error" role="alert">{issueError}</div>}
-            <div className="issues-content">
-              <form className="issue-create" onSubmit={createIssue}>
-                <div><strong>Open a new issue</strong><span>Issues are stored with the repository and shared with the team.</span></div>
-                <label><span>Title</span><input value={issueTitle} onChange={(event) => setIssueTitle(event.target.value)} placeholder="What needs attention?" maxLength={160} disabled={!can("issues")}/></label>
-                <label><span>Description</span><textarea value={issueBody} onChange={(event) => setIssueBody(event.target.value)} placeholder="Add context, expected behavior, or acceptance criteria." maxLength={5000} disabled={!can("issues")}/></label>
-                <label><span>Labels</span><input value={issueLabels} onChange={(event) => setIssueLabels(event.target.value)} placeholder="bug, performance" maxLength={180} disabled={!can("issues")}/><small>Comma-separated · up to six labels</small></label>
-                <button disabled={!issueTitle.trim() || issueMutation || !can("issues")}>{issueMutation ? "Saving…" : "Open issue"}</button>
-                {!can("issues") && <p className="permission-note">Contributor access is required to manage issues.</p>}
-              </form>
-              <section className="issues-browser">
-                <div className="issue-toolbar"><div>{(["open", "closed", "all"] as const).map((filter) => <button key={filter} className={issueFilter === filter ? "active" : ""} onClick={() => setIssueFilter(filter)}>{filter}<span>{filter === "all" ? issues.length : issues.filter((issue) => issue.status === filter).length}</span></button>)}</div><button onClick={() => void loadIssues()} disabled={issuesLoading}>{issuesLoading ? "Refreshing…" : "Refresh"}</button></div>
-                <div className="issue-workspace">
-                  <div className="issue-list">
-                    {filteredIssues.map((issue) => <button key={issue.number} className={selectedIssue?.number === issue.number ? "active" : ""} onClick={() => setSelectedIssueNumber(issue.number)}><i className={issue.status}/><div><strong>{issue.title}</strong><span>#{issue.number} opened by {issue.author}</span><p>{issue.labels.map((label) => <em key={label}>{label}</em>)}</p></div><b>{issue.comments.length}</b></button>)}
-                    {!issuesLoading && !filteredIssues.length && <div className="empty-issues"><Icon name="check" size={28}/><strong>No {issueFilter === "all" ? "" : issueFilter} issues</strong><span>Use the form to capture the next piece of work.</span></div>}
-                  </div>
-                  {selectedIssue ? <article className="issue-detail">
-                    <header><div><span className={`issue-state ${selectedIssue.status}`}>{selectedIssue.status}</span><code>#{selectedIssue.number}</code></div><button onClick={() => void changeIssueStatus(selectedIssue)} disabled={issueMutation || !can("issues")}>{selectedIssue.status === "open" ? "Close issue" : "Reopen issue"}</button></header>
-                    <h2>{selectedIssue.title}</h2>
-                    <div className="issue-author"><span className="avatar xs mint">{selectedIssue.author.slice(0, 2).toUpperCase()}</span><p><strong>{selectedIssue.author}</strong> opened this issue · {new Date(selectedIssue.createdAt).toLocaleString()}</p></div>
-                    <p className="issue-description">{selectedIssue.body || "No description was provided."}</p>
-                    <div className="issue-labels">{selectedIssue.labels.map((label) => <span key={label}>{label}</span>)}</div>
-                    <section className="issue-comments"><h3>Discussion <span>{selectedIssue.comments.length}</span></h3>{selectedIssue.comments.map((comment) => <article key={comment.id}><span className="avatar xs violet">{comment.author.slice(0, 2).toUpperCase()}</span><div><header><strong>{comment.author}</strong><time>{new Date(comment.createdAt).toLocaleString()}</time></header><p>{comment.body}</p></div></article>)}</section>
-                    <form className="comment-form" onSubmit={addIssueComment}><textarea value={issueComment} onChange={(event) => setIssueComment(event.target.value)} placeholder={can("issues") ? "Add to the discussion…" : "Read-only discussion"} maxLength={3000} disabled={!can("issues")}/><button disabled={!issueComment.trim() || issueMutation || !can("issues")}>{issueMutation ? "Posting…" : "Comment"}</button></form>
-                  </article> : <div className="empty-issues detail"><Icon name="activity" size={28}/><strong>Select an issue</strong><span>Open an issue to view its details and discussion.</span></div>}
-                </div>
-              </section>
-            </div>
-          </aside>}
-          {activeNav === "Actions" && <aside className="product-drawer actions-drawer" aria-label="Repository actions">
-            <header><div><Icon name="radio"/><div><strong>Actions</strong><span>Self-hosted repository checks · no external CI service</span></div></div><div><button className="run-workflow" onClick={() => void runWorkflow()} disabled={runningWorkflow || !repository || !can("actions")}>{runningWorkflow ? "Running…" : "Run workflow"}</button><button onClick={() => setActiveNav("Code")} aria-label="Close actions">×</button></div></header>
-            {actionsError && <div className="drawer-error" role="alert">{actionsError}</div>}
-            <div className="actions-content">
-              <aside className="workflow-sidebar"><strong>Workflows</strong><button className="active"><Icon name="activity" size={15}/><div><span>Mesh CI</span><small>Repository quality gate</small></div></button><footer><span>Triggers</span><code>push · manual</code></footer></aside>
-              <section className="run-list">
-                <header><div><strong>Workflow runs</strong><span>{repository?.owner}/{repository?.name} · {repository?.branch}</span></div><button onClick={() => void loadActions()} disabled={actionsLoading}>{actionsLoading ? "Refreshing…" : "Refresh"}</button></header>
-                {workflowRuns.map((run) => <article className={`workflow-run ${run.status}`} key={run.id}>
-                  <details open={run.id === workflowRuns[0]?.id}>
-                    <summary><span className={`run-icon ${run.status}`}>{run.status === "success" ? "✓" : "×"}</span><div><strong>{run.workflow}</strong><span>Run #{run.id} · {run.trigger} by {run.author}</span></div><code>{run.commitOid.slice(0, 8)}</code><time>{run.durationMs}ms</time><b>{new Date(run.createdAt).toLocaleString()}</b></summary>
-                    <div className="run-steps">{run.steps.map((step, index) => <article key={`${step.name}-${index}`}><span className={step.status}>{step.status === "success" ? "✓" : "×"}</span><div><header><strong>{step.name}</strong><time>{step.durationMs}ms</time></header><pre>{step.logs.join("\n")}</pre></div></article>)}</div>
-                  </details>
-                </article>)}
-                {!actionsLoading && !workflowRuns.length && <div className="empty-actions"><Icon name="activity" size={30}/><strong>No workflow runs yet</strong><span>{can("actions") ? "Run Mesh CI against the current branch to create the first result." : "Maintainer access is required to start workflow runs."}</span><button onClick={() => void runWorkflow()} disabled={!can("actions")}>Run workflow</button></div>}
-              </section>
-            </div>
-          </aside>}
-          {teamOpen && <aside className="product-drawer team-drawer" aria-label="Repository access">
-            <header><div><Icon name="users"/><div><strong>Repository access</strong><span>{repository?.owner}/{repository?.name} · your role is {currentAccess?.role}</span></div></div><button onClick={() => setTeamOpen(false)} aria-label="Close repository access">×</button></header>
-            {teamError && <div className="drawer-error" role="alert">{teamError}</div>}
-            <div className="team-content">
-              <section className="team-members">
-                <header><div><strong>Members</strong><span>{team?.members.length ?? 0} people with access</span></div></header>
-                {teamLoading && <p className="team-loading">Loading repository members…</p>}
-                {!teamLoading && team?.members.map((member) => <article key={member.userId}>
-                  <span className="avatar violet">{member.displayName.slice(0, 2).toUpperCase()}</span>
-                  <div><strong>{member.displayName}</strong><span>@{member.username} · {member.email}</span></div>
-                  {can("manage_members") && member.role !== "owner" ? <select value={member.role} onChange={(event) => void changeMember(member, event.target.value as RepositoryRole)} disabled={teamMutation}><option value="maintainer">Maintainer</option><option value="contributor">Contributor</option><option value="viewer">Viewer</option></select> : <span className={`role-badge ${member.role}`}>{member.role}</span>}
-                  {can("manage_members") && member.role !== "owner" && <button className="remove-member" onClick={() => void changeMember(member, null)} disabled={teamMutation}>Remove</button>}
-                </article>)}
-              </section>
-              <aside className="team-invitations">
-                <div><strong>Invite a teammate</strong><span>Permissions are enforced for source control and live rooms.</span></div>
-                {can("invite") ? <form onSubmit={inviteMember}>
-                  <label><span>Email</span><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="teammate@example.com" required/></label>
-                  <label><span>Role</span><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as Exclude<RepositoryRole, "owner">)}>{currentAccess?.role === "owner" && <option value="maintainer">Maintainer</option>}<option value="contributor">Contributor</option><option value="viewer">Viewer</option></select></label>
-                  <button disabled={!inviteEmail.trim() || teamMutation}>{teamMutation ? "Updating…" : "Send invitation"}</button>
-                </form> : <p className="permission-note">Only owners and maintainers can invite repository members.</p>}
-                <section className="invitation-list"><strong>Invitations</strong>{team?.invitations.length ? team.invitations.map((invitation) => <article key={invitation.id}><div><span>{invitation.email}</span><small>{invitation.role} · {invitation.status}</small></div><time>{new Date(invitation.createdAt).toLocaleDateString()}</time></article>) : <p>No invitations yet.</p>}</section>
-              </aside>
-            </div>
-          </aside>}
+          {activeNav === "Issues" && <IssuesDrawer
+            canManage={can("issues")}
+            error={issueError}
+            filter={issueFilter}
+            filteredIssues={filteredIssues}
+            issueBody={issueBody}
+            issueComment={issueComment}
+            issueLabels={issueLabels}
+            issueTitle={issueTitle}
+            issues={issues}
+            loading={issuesLoading}
+            mutating={issueMutation}
+            selectedIssue={selectedIssue}
+            onAddComment={addIssueComment}
+            onChangeBody={setIssueBody}
+            onChangeComment={setIssueComment}
+            onChangeFilter={setIssueFilter}
+            onChangeLabels={setIssueLabels}
+            onChangeStatus={(issue) => void changeIssueStatus(issue)}
+            onChangeTitle={setIssueTitle}
+            onClose={() => setActiveNav("Code")}
+            onCreateIssue={createIssue}
+            onRefresh={() => void loadIssues()}
+            onSelectIssue={setSelectedIssueNumber}
+          />}
+          {activeNav === "Actions" && <ActionsDrawer
+            canRun={can("actions")}
+            error={actionsError}
+            loading={actionsLoading}
+            repository={repository}
+            running={runningWorkflow}
+            runs={workflowRuns}
+            onClose={() => setActiveNav("Code")}
+            onRefresh={() => void loadActions()}
+            onRun={() => void runWorkflow()}
+          />}
+          {teamOpen && <TeamDrawer
+            canInvite={can("invite")}
+            canManageMembers={can("manage_members")}
+            currentRole={currentAccess?.role}
+            error={teamError}
+            inviteEmail={inviteEmail}
+            inviteRole={inviteRole}
+            loading={teamLoading}
+            mutating={teamMutation}
+            repository={repository}
+            team={team}
+            onChangeInviteEmail={setInviteEmail}
+            onChangeInviteRole={setInviteRole}
+            onChangeMember={(member, role) => void changeMember(member, role)}
+            onClose={() => setTeamOpen(false)}
+            onInvite={inviteMember}
+          />}
         </section>
 
-        <aside className="collab panel">
-          <div className="room-heading"><div><strong>Live room</strong><span>{actualPeers}</span></div><span className={`audio-state ${audio.status}`}>{audio.status === "connected" ? `${audio.connectedPeers + 1} on audio` : audio.status === "idle" ? "Audio off" : audio.status}</span><button aria-label="Room options"><Icon name="more"/></button></div>
-          <section className="voice-section"><div className="voice-title"><p className="section-label">Voice · WebRTC</p>{audio.status === "idle" || audio.status === "error" ? <button className="join-audio" onClick={audio.join} disabled={!can("audio")}><Icon name="headphones" size={15}/>{can("audio") ? audio.status === "error" ? "Retry audio" : "Join audio" : "Audio restricted"}</button> : null}</div>
-            <div className="people-list">{(sync.presence.length ? sync.presence : [{ clientId: sync.selfId || "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => {
-              const isSelf = person.clientId === sync.selfId || person.clientId === "local";
-              const peerState = audio.peerStates[person.clientId];
-              const personStatus = isSelf
-                ? audio.status === "connected" ? audio.muted ? "Muted" : audio.speaking ? "Speaking" : "In audio" : "Available"
-                : peerState === "connected" ? "Audio connected" : peerState === "connecting" ? "Connecting audio" : "Available";
-              return <div className="person" key={person.clientId}><span className={`avatar ${person.color}`}>{person.name.slice(0,2).toUpperCase()}</span><div><strong>{person.name}</strong><small className={personStatus === "Speaking" ? "speaking" : ""}>{personStatus}</small></div>{isSelf && audio.speaking ? <div className="waveform" style={{opacity: Math.min(1, .45 + audio.level * 8)}}>{Array.from({length: 17}).map((_, i) => <i key={i} style={{height: `${5 + ((i * 7) % 17)}px`}} />)}</div> : <span className={`presence-dot ${peerState === "connected" || (isSelf && audio.status === "connected") ? "audio-live" : ""}`}/>}</div>;
-            })}</div>
-            <div className="call-controls-wrap">
-              <div className="call-controls"><button disabled={audio.status !== "connected" || !can("audio")} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button><button disabled={!can("audio")} className={deviceMenuOpen ? "active" : ""} onClick={() => { setDeviceMenuOpen((open) => !open); void audio.refreshDevices(); }} aria-label="Choose microphone and speaker" aria-expanded={deviceMenuOpen} aria-haspopup="dialog" aria-controls="audio-device-menu"><Icon name="chevron" size={14}/></button><button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={!can("audio") || audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button><button aria-label="Room settings" onClick={() => flash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button><button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={() => { audio.leave(); setDeviceMenuOpen(false); }}><Icon name="phone"/></button></div>
-              {deviceMenuOpen && <div className="device-menu" id="audio-device-menu" role="dialog" aria-label="Voice chat devices">
-                <header><div><strong>Voice chat devices</strong><span>{audio.devicesLoading ? "Finding devices…" : "Changes apply immediately"}</span></div><button onClick={() => setDeviceMenuOpen(false)} aria-label="Close audio device options">×</button></header>
-                <label><span>Microphone</span><select value={audio.inputDeviceId} onChange={(event) => void audio.selectInputDevice(event.target.value)} disabled={audio.devicesLoading}><option value="">System default</option>{audio.inputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
-                <label><span>Speaker</span><select value={audio.outputDeviceId} onChange={(event) => void audio.selectOutputDevice(event.target.value)} disabled={audio.devicesLoading || !audio.outputSelectionSupported}><option value="">System default</option>{audio.outputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
-                {!audio.outputSelectionSupported && <p>Speaker selection is not supported by this browser. Your system default will be used.</p>}
-                {audio.deviceError && <p className="audio-error" role="alert">{audio.deviceError}</p>}
-              </div>}
-            </div>
-            {audio.status === "requesting" && <p className="audio-help">Choose Allow in the microphone permission prompt.</p>}
-            {audio.error && <p className="audio-error" role="alert">{audio.error}</p>}
-          </section>
-          <section className="chat-section"><p className="section-label">Chat</p><div className="messages">{messages.map((message, index) => <article className="message" key={`${message.time}-${index}`}><span className={`avatar xs ${message.color}`}>{message.initials}</span><div><header><strong>{message.who}</strong><time>{message.time}</time></header><p>{message.body}</p></div></article>)}</div>
-            <form className="composer" onSubmit={sendMessage}><input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={can("chat") ? "Message the room…" : "Chat requires contributor access"} aria-label="Message the room" disabled={!can("chat")}/><button aria-label="Send message" disabled={!can("chat") || !draft.trim()}><Icon name="send" size={17}/></button></form><small className="composer-help">{can("chat") ? "Enter to send · synced to everyone" : "Viewer access is read-only"}</small>
-          </section>
-        </aside>
+        <CollaborationPanel
+          actualPeers={actualPeers}
+          audio={audio}
+          canAudio={can("audio")}
+          canChat={can("chat")}
+          deviceMenuOpen={deviceMenuOpen}
+          draft={draft}
+          messages={messages}
+          sync={sync}
+          onChangeDraft={setDraft}
+          onFlash={flash}
+          onSendMessage={sendMessage}
+          onSetDeviceMenuOpen={setDeviceMenuOpen}
+        />
       </section>
 
-      <footer className="telemetry">
-        <div><Icon name="radio"/><span>round trip</span><strong>{sync.latency || "—"}{sync.latency ? "ms" : ""}</strong></div><div><Icon name="users"/><strong>{actualPeers}</strong><span>{actualPeers === 1 ? "peer" : "peers"}</span></div><div><i className={`status-dot ${sync.status}`}/><strong className="mint">{sync.status === "live" ? "Connected" : sync.status}</strong></div><div><Icon name="activity"/><span>CRDT ops</span><strong>{sync.appliedOperations.toLocaleString()}</strong></div><div title={`${sync.binaryBytesSent.toLocaleString()} binary bytes sent`}><Icon name="radio"/><span>wire saved</span><strong>{sync.jsonBytesAvoided.toLocaleString()}B</strong></div><div title="Deleted payloads compacted while retaining causal anchors"><Icon name="git"/><span>compacted</span><strong>{sync.compactedTombstones}/{sync.tombstones}</strong></div><div className="sparkline" aria-label="Live synchronization activity">{Array.from({length: 34}).map((_, i) => <i key={i} style={{height: `${7 + ((i * 11) % 17)}px`}} />)}</div><button onClick={() => flash("Binary CRDT v1 · durable replay · causal-safe tombstone compaction")}>View details</button>
-      </footer>
+      <TelemetryFooter actualPeers={actualPeers} sync={sync} onShowDetails={() => flash("Binary CRDT v1 · durable replay · causal-safe tombstone compaction")}/>
       {toast && <div className="toast"><Icon name="check" size={16}/>{toast}</div>}
     </main>
   );

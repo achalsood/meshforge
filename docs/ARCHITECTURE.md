@@ -22,6 +22,10 @@
 | Media plane | Audio transport, short-lived signaling, mute state, and active-speaker metering | WebRTC mesh + HTTP signaling (implemented); SFU at scale |
 | Mesh Intelligence | Dependency graph, code-risk rules, duplicate detection, ranked deterministic patches | TypeScript analysis engine inside the Worker (implemented) |
 
+## Frontend organization
+
+`app/page.tsx` is the workspace composition root: it owns cross-feature state such as the selected repository, active branch, editor buffer, and realtime session. Feature rendering lives under `components/workspace/`, while repository-specific Issues and Actions data flows live in dedicated hooks under `lib/workspace/`. This keeps API orchestration separate from presentational components, gives each drawer a focused prop contract, and prevents feature-local state from expanding the main workspace component.
+
 ## Data structures worth discussing in interviews
 
 ### Indexed sequence
