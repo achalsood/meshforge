@@ -18,7 +18,7 @@
 | Collaboration core | RGA operations, dependency queues, replay, compaction | TypeScript library (core implemented) |
 | Repository service | Content-addressed blobs and trees, commit DAGs, refs, pull requests, diffs | Worker API + D1 (implemented) |
 | Media plane | Audio transport, short-lived signaling, mute state, and active-speaker metering | WebRTC mesh + HTTP signaling (implemented); SFU at scale |
-| AI patch service | Context selection, inference, diff validation | Retrieval pipeline + sandbox worker |
+| Mesh Intelligence | Dependency graph, code-risk rules, duplicate detection, ranked deterministic patches | TypeScript analysis engine inside the Worker (implemented) |
 
 ## Data structures worth discussing in interviews
 
@@ -68,11 +68,11 @@ Budgets:
 - Encoded operation: median below 40 bytes before transport compression.
 - Hot document state: below 2.5× visible UTF-8 text after compaction.
 
-## AI safety and evaluation
+## Self-contained repository intelligence
 
-The AI service receives only explicitly selected repository context plus retrieval results authorized for the current user. Output is parsed into a structured patch, applied in a sandbox, formatted, type-checked, and tested before presentation.
+Mesh Intelligence sends repository snapshots only to the application-owned Worker; it does not call a third-party model API. A single-pass rule engine detects security, reliability, and performance risks. Import resolution builds a directed dependency graph, Rabin–Karp-style normalized shingles identify verified duplicate blocks, and binary max-heaps rank findings and file hotspots. Safe mechanical improvements are emitted as exact before/after patches and are rejected if the working file changed after analysis.
 
-Evaluation tracks patch-apply rate, test pass rate, reviewer acceptance, regressions, latency, token cost, and retrieval precision on a versioned repository task set.
+Evaluation tracks finding precision, patch-apply rate, test pass rate, reviewer acceptance, regressions, and analysis latency on a versioned repository task set. A future offline open-weight model can augment explanations without replacing the deterministic evidence and patch contracts.
 
 ## Milestone acceptance tests
 

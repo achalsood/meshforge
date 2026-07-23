@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
+import { analyzeRepository } from "../lib/intelligence/repository-analyzer";
 import { commitRepository, createRepositoryBranch, createRepositoryPullRequest, getRepositorySnapshot, mergeRepositoryPullRequest } from "../lib/server/repository-store";
 import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
 
@@ -148,6 +149,22 @@ async function handlePullRequests(request: Request, env: Env, owner: string, nam
   }
 }
 
+async function handleRepositoryAnalysis(request: Request): Promise<Response> {
+  if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
+  const raw = await request.text();
+  if (raw.length > 2_200_000) return Response.json({ error: "Analysis payload is too large" }, { status: 413 });
+  try {
+    const input = JSON.parse(raw) as { files?: Array<{ path?: string; content?: string }> };
+    if (!Array.isArray(input.files) || !input.files.length || input.files.length > 200) {
+      return Response.json({ error: "Expected 1–200 repository files" }, { status: 400 });
+    }
+    const files = input.files.map((file) => ({ path: String(file.path ?? "").slice(0, 240), content: String(file.content ?? "") }));
+    return Response.json(analyzeRepository(files), { headers: { "Cache-Control": "no-store" } });
+  } catch {
+    return Response.json({ error: "Invalid analysis request" }, { status: 400 });
+  }
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -168,6 +185,8 @@ const worker = {
 
     const signalMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/signals$/i);
     if (signalMatch) return handleAudioSignals(request, env, signalMatch[1]);
+
+    if (url.pathname === "/api/intelligence/analyze") return handleRepositoryAnalysis(request);
 
     const branchMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/branches$/i);
     if (branchMatch) return handleRepositoryBranches(request, env, branchMatch[1], branchMatch[2]);

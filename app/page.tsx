@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
+import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
 import type { RepositorySnapshot } from "@/lib/repository/types";
 
 type IconName =
@@ -111,6 +112,11 @@ function roomSlug(path: string): string {
 export default function Home() {
   const [draft, setDraft] = useState("");
   const [aiOpen, setAiOpen] = useState(false);
+  const [analysis, setAnalysis] = useState<RepositoryAnalysis | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const [analysisTab, setAnalysisTab] = useState<"findings" | "hotspots" | "graph" | "algorithms">("findings");
+  const [selectedFindingId, setSelectedFindingId] = useState("");
   const [activeNav, setActiveNav] = useState("Code");
   const [activeFile, setActiveFile] = useState("src/retrieval/hnsw.ts");
   const [toast, setToast] = useState("");
@@ -145,6 +151,7 @@ export default function Home() {
   const actualPeers = Math.max(1, sync.presence.length);
   const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
+  const selectedFinding = analysis?.findings.find((finding) => finding.id === selectedFindingId) ?? analysis?.findings[0];
 
   useEffect(() => {
     let cancelled = false;
@@ -161,6 +168,17 @@ export default function Home() {
       .catch((cause) => !cancelled && setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be loaded"));
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        void openMeshAI();
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  });
 
   const workingSnapshot = repository?.files.map((file) => ({
     path: file.path,
@@ -298,6 +316,51 @@ export default function Home() {
     }
   }
 
+  async function runMeshAnalysis() {
+    if (!repository || analyzing) return;
+    setAnalyzing(true);
+    setAnalysisError("");
+    try {
+      const response = await fetch("/api/intelligence/analyze", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: workingSnapshot }),
+      });
+      const result = await response.json() as RepositoryAnalysis | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Analysis failed");
+      setAnalysis(result);
+      setSelectedFindingId(result.findings[0]?.id ?? "");
+    } catch (cause) {
+      setAnalysisError(cause instanceof Error ? cause.message : "Analysis failed");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function openMeshAI() {
+    setAiOpen(true);
+    setHistoryOpen(false);
+    setActiveNav("Code");
+    if (!analysis && repository) await runMeshAnalysis();
+  }
+
+  function applySuggestion(finding: AnalysisFinding) {
+    if (!finding.patch) return;
+    const file = workingSnapshot.find((candidate) => candidate.path === finding.patch?.path);
+    if (!file || !file.content.includes(finding.patch.before)) {
+      setAnalysisError("The file changed after analysis. Run the review again before applying this patch.");
+      return;
+    }
+    const next = file.content.replace(finding.patch.before, finding.patch.after);
+    if (file.path === activeFile) sync.edit(next);
+    else {
+      setWorkingFiles((current) => ({ ...current, [file.path]: next }));
+      setActiveFile(file.path);
+    }
+    setAnalysis(null);
+    setSelectedFindingId("");
+    setAiOpen(false);
+    flash(`Applied Mesh AI patch to ${file.path}`);
+  }
+
   function sendMessage(event: FormEvent) {
     event.preventDefault();
     const body = draft.trim();
@@ -373,8 +436,22 @@ export default function Home() {
             </div>
             <div className="minimap" aria-hidden="true">{Array.from({length: 38}).map((_, i) => <i key={i} style={{width: `${28 + ((i * 17) % 58)}%`}} />)}<span /></div>
           </div>
-          <button className="ai-fab" onClick={() => setAiOpen((v) => !v)} aria-expanded={aiOpen}><Icon name="sparkles"/><span>Ask Mesh AI</span><kbd>⌘ K</kbd></button>
-          {aiOpen && <div className="ai-card"><div><span className="ai-glyph"><Icon name="sparkles"/></span><div><strong>Optimize this index</strong><p>Mesh AI found one allocation hotspot and a safer adaptive efSearch strategy.</p></div></div><button onClick={() => flash("AI suggestion inserted as a reviewable patch")}>Review patch <span>+12 −4</span></button></div>}
+          <button className="ai-fab" onClick={() => aiOpen ? setAiOpen(false) : void openMeshAI()} aria-expanded={aiOpen}><Icon name="sparkles"/><span>Mesh Intelligence</span><kbd>⌘ K</kbd></button>
+          {aiOpen && <aside className="intelligence-drawer" aria-label="Mesh Intelligence repository review">
+            <header><div><span className="ai-glyph"><Icon name="sparkles"/></span><div><strong>Mesh Intelligence</strong><span>Local repository analysis · no external APIs</span></div></div><div><button className="rerun-analysis" onClick={() => void runMeshAnalysis()} disabled={analyzing}>{analyzing ? "Analyzing…" : "Run again"}</button><button className="close-intelligence" onClick={() => setAiOpen(false)} aria-label="Close Mesh Intelligence">×</button></div></header>
+            {analysisError && <div className="analysis-error" role="alert">{analysisError}</div>}
+            {analyzing && !analysis ? <div className="analysis-loading"><Icon name="activity" size={25}/><strong>Indexing repository…</strong><span>Building dependency graph, rolling hashes, and risk heap</span><i/></div> : analysis && <>
+              <section className="analysis-summary"><div className="health-score"><strong>{analysis.summary.score}</strong><span>health score</span></div><div><strong>{analysis.summary.findings}</strong><span>findings</span></div><div><strong>{analysis.summary.files}</strong><span>files</span></div><div><strong>{analysis.summary.lines}</strong><span>lines</span></div><div><strong>{analysis.summary.dependencyEdges}</strong><span>edges</span></div><div><strong>{analysis.summary.duplicateBlocks}</strong><span>duplicates</span></div></section>
+              <nav className="analysis-tabs" aria-label="Analysis sections">{(["findings", "hotspots", "graph", "algorithms"] as const).map((tab) => <button key={tab} className={analysisTab === tab ? "active" : ""} onClick={() => setAnalysisTab(tab)}>{tab}</button>)}</nav>
+              <div className="analysis-body">
+                {analysisTab === "findings" && <div className="findings-layout"><div className="finding-list">{analysis.findings.length ? analysis.findings.map((finding) => <button key={finding.id} className={selectedFinding?.id === finding.id ? "active" : ""} onClick={() => setSelectedFindingId(finding.id)}><span className={`severity ${finding.severity}`}>{finding.severity}</span><div><strong>{finding.title}</strong><code>{finding.path}:{finding.line}</code></div><em>{finding.category}</em></button>) : <div className="clean-analysis"><Icon name="check" size={25}/><strong>No actionable risks found</strong><span>The repository passed every active rule.</span></div>}</div>{selectedFinding && <article className="finding-detail"><header><span className={`severity ${selectedFinding.severity}`}>{selectedFinding.severity}</span><span>{selectedFinding.category}</span></header><h3>{selectedFinding.title}</h3><p>{selectedFinding.explanation}</p><label>Evidence</label><pre><code>{selectedFinding.evidence}</code></pre><label>Recommendation</label><p>{selectedFinding.suggestion}</p><div className="finding-location"><Icon name="file" size={14}/><code>{selectedFinding.path}:{selectedFinding.line}</code><button onClick={() => { openFile(selectedFinding.path); setAiOpen(false); }}>Open file</button></div>{selectedFinding.patch && <button className="apply-patch" onClick={() => applySuggestion(selectedFinding)}><Icon name="sparkles" size={15}/>Apply deterministic patch</button>}</article>}</div>}
+                {analysisTab === "hotspots" && <div className="hotspot-list">{analysis.hotspots.map((hotspot, index) => <button key={hotspot.path} onClick={() => { openFile(hotspot.path); setAiOpen(false); }}><strong>#{index + 1}</strong><div><span>{hotspot.path}</span><i style={{width: `${Math.min(100, hotspot.risk)}%`}}/></div><code>C{hotspot.complexity} · {hotspot.lines} lines · {hotspot.imports} imports</code></button>)}</div>}
+                {analysisTab === "graph" && <div className="dependency-list"><header><span>Source</span><span>Dependency</span><span>Type</span></header>{analysis.dependencies.length ? analysis.dependencies.map((edge) => <div key={`${edge.from}-${edge.to}`}><code>{edge.from}</code><code>{edge.to}</code><span className={edge.external ? "external" : "internal"}>{edge.external ? "package" : "internal"}</span></div>) : <div className="empty-analysis">No import edges found.</div>}</div>}
+                {analysisTab === "algorithms" && <div className="algorithm-grid">{analysis.algorithms.map((algorithm) => <article key={algorithm.name}><Icon name="activity" size={18}/><div><strong>{algorithm.name}</strong><p>{algorithm.purpose}</p></div><code>{algorithm.complexity}</code></article>)}</div>}
+              </div>
+              <footer className="analysis-footer"><span>Runs inside MeshForge</span><span>Source never leaves your deployment</span><span>{new Date(analysis.generatedAt).toLocaleTimeString()}</span></footer>
+            </>}
+          </aside>}
           {historyOpen && <aside className="history-drawer" aria-label="Commit history">
             <header><div><Icon name="git"/><div><strong>Commit history</strong><span>{repository?.branch ?? "main"} · immutable DAG</span></div></div><button onClick={() => setHistoryOpen(false)} aria-label="Close history">×</button></header>
             <div className="history-list">{repository?.history.map((commit, index) => <article key={commit.oid} className={index === 0 ? "head" : ""}>

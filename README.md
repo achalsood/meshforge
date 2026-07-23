@@ -24,7 +24,7 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Voice-room controls and speaking state
 - Working room chat composer
 - Peer-to-peer WebRTC audio with short-lived room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
-- AI optimization card with reviewable patch action
+- Self-contained Mesh Intelligence review with dependency graphs, complexity hotspots, security/performance rules, duplicate-code detection, and deterministic patches
 - CRDT throughput, peer count, connection, and p95 latency telemetry
 - Responsive layout that preserves the editor and collapses secondary panels
 
@@ -39,7 +39,7 @@ flowchart TD
   UI --> RTC[WebRTC media]
   UI --> API[Repository API]
   API --> OBJ[Git objects]
-  API --> AI[AI patch service]
+  API --> AI[Mesh Intelligence engine]
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component boundaries, data structures, complexity targets, and the implementation roadmap.
@@ -56,7 +56,7 @@ This structure avoids repeatedly scanning the entire document when translating b
 2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
 3. **Source management** — implemented repository snapshots, content-addressed objects, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, deduplication metrics, and stale-base protection. Next: multiple repositories, conflict-aware rebasing, review comments, and permissions.
 4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
-5. **AI review** — repository-aware retrieval, structured patch generation, sandboxed validation, eval harness.
+5. **Repository intelligence** — implemented local dependency analysis, risk ranking, rolling-hash duplicate detection, complexity hotspots, and deterministic patch generation with no external API dependency. Next: language-aware parsers, test-impact analysis, and an offline open-weight model option.
 6. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
 
 ## Run locally
