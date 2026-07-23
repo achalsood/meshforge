@@ -4,7 +4,11 @@ import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
 import { analyzeRepository } from "../lib/intelligence/repository-analyzer";
-import { commitRepository, createRepositoryBranch, createRepositoryPullRequest, getRepositorySnapshot, mergeRepositoryPullRequest } from "../lib/server/repository-store";
+import {
+  addRepositoryIssueComment, commitRepository, createRepositoryBranch, createRepositoryIssue,
+  createRepositoryPullRequest, getRepositorySnapshot, listRepositoryIssues, listRepositoryWorkflowRuns,
+  mergeRepositoryPullRequest, runRepositoryWorkflow, updateRepositoryIssue,
+} from "../lib/server/repository-store";
 import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
 
 interface Env {
@@ -149,6 +153,46 @@ async function handlePullRequests(request: Request, env: Env, owner: string, nam
   }
 }
 
+async function handleIssues(request: Request, env: Env, owner: string, name: string, number?: number, comments = false): Promise<Response> {
+  try {
+    if (request.method === "GET" && !number) {
+      return Response.json(await listRepositoryIssues(env.DB, owner, name), { headers: { "Cache-Control": "no-store" } });
+    }
+    if (request.method === "POST" && !number) {
+      const input = await request.json() as Parameters<typeof createRepositoryIssue>[3];
+      return Response.json(await createRepositoryIssue(env.DB, owner, name, input), { status: 201 });
+    }
+    if (request.method === "PATCH" && number && !comments) {
+      const input = await request.json() as Parameters<typeof updateRepositoryIssue>[4];
+      return Response.json(await updateRepositoryIssue(env.DB, owner, name, number, input));
+    }
+    if (request.method === "POST" && number && comments) {
+      const input = await request.json() as Parameters<typeof addRepositoryIssueComment>[4];
+      return Response.json(await addRepositoryIssueComment(env.DB, owner, name, number, input), { status: 201 });
+    }
+    return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST, PATCH" } });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Issue request failed";
+    return Response.json({ error: message }, { status: message.includes("not found") ? 404 : 400 });
+  }
+}
+
+async function handleActions(request: Request, env: Env, owner: string, name: string): Promise<Response> {
+  try {
+    if (request.method === "GET") {
+      return Response.json(await listRepositoryWorkflowRuns(env.DB, owner, name), { headers: { "Cache-Control": "no-store" } });
+    }
+    if (request.method === "POST") {
+      const input = await request.json() as Parameters<typeof runRepositoryWorkflow>[3];
+      return Response.json(await runRepositoryWorkflow(env.DB, owner, name, input), { status: 201 });
+    }
+    return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Action request failed";
+    return Response.json({ error: message }, { status: message.includes("not found") ? 404 : 400 });
+  }
+}
+
 async function handleRepositoryAnalysis(request: Request): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
   const raw = await request.text();
@@ -193,6 +237,12 @@ const worker = {
 
     const pullMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/pulls(?:\/(\d+)(\/merge)?)?$/i);
     if (pullMatch) return handlePullRequests(request, env, pullMatch[1], pullMatch[2], pullMatch[3] ? Number(pullMatch[3]) : undefined, Boolean(pullMatch[4]));
+
+    const issueMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/issues(?:\/(\d+)(\/comments)?)?$/i);
+    if (issueMatch) return handleIssues(request, env, issueMatch[1], issueMatch[2], issueMatch[3] ? Number(issueMatch[3]) : undefined, Boolean(issueMatch[4]));
+
+    const actionMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/actions$/i);
+    if (actionMatch) return handleActions(request, env, actionMatch[1], actionMatch[2]);
 
     const repositoryMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)(\/commits)?$/i);
     if (repositoryMatch) return handleRepository(request, env, repositoryMatch[1], repositoryMatch[2], Boolean(repositoryMatch[3]));

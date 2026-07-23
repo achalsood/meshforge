@@ -110,3 +110,45 @@ export const repoPullRequests = sqliteTable("repo_pull_requests", {
   uniqueIndex("repo_pull_requests_repo_number_unique").on(table.repositoryId, table.number),
   index("repo_pull_requests_repo_status_idx").on(table.repositoryId, table.status),
 ]);
+
+export const repoIssues = sqliteTable("repo_issues", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  repositoryId: integer("repository_id").notNull(),
+  number: integer("number").notNull(),
+  title: text("title").notNull(),
+  body: text("body").notNull().default(""),
+  status: text("status", { enum: ["open", "closed"] }).notNull().default("open"),
+  author: text("author").notNull(),
+  assignee: text("assignee"),
+  labels: text("labels").notNull().default("[]"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  closedAt: integer("closed_at"),
+}, (table) => [
+  uniqueIndex("repo_issues_repo_number_unique").on(table.repositoryId, table.number),
+  index("repo_issues_repo_status_updated_idx").on(table.repositoryId, table.status, table.updatedAt),
+]);
+
+export const repoIssueComments = sqliteTable("repo_issue_comments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  repositoryId: integer("repository_id").notNull(),
+  issueNumber: integer("issue_number").notNull(),
+  author: text("author").notNull(),
+  body: text("body").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [index("repo_issue_comments_issue_idx").on(table.repositoryId, table.issueNumber, table.createdAt)]);
+
+export const repoWorkflowRuns = sqliteTable("repo_workflow_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  repositoryId: integer("repository_id").notNull(),
+  workflow: text("workflow").notNull(),
+  status: text("status", { enum: ["success", "failure"] }).notNull(),
+  trigger: text("trigger", { enum: ["push", "manual"] }).notNull(),
+  branch: text("branch").notNull(),
+  commitOid: text("commit_oid").notNull(),
+  author: text("author").notNull(),
+  steps: text("steps").notNull(),
+  durationMs: integer("duration_ms").notNull(),
+  createdAt: integer("created_at").notNull(),
+  completedAt: integer("completed_at").notNull(),
+}, (table) => [index("repo_workflow_runs_repo_created_idx").on(table.repositoryId, table.createdAt)]);

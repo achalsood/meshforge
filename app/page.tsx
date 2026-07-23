@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
 import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
-import type { RepositorySnapshot } from "@/lib/repository/types";
+import type { RepositoryIssue, RepositorySnapshot, WorkflowRun } from "@/lib/repository/types";
 
 type IconName =
   | "branch" | "chevron" | "code" | "search" | "more" | "share"
@@ -134,6 +134,20 @@ export default function Home() {
   const [creatingPull, setCreatingPull] = useState(false);
   const [mergingNumber, setMergingNumber] = useState<number | null>(null);
   const [repositoryError, setRepositoryError] = useState("");
+  const [issues, setIssues] = useState<RepositoryIssue[]>([]);
+  const [issueTitle, setIssueTitle] = useState("");
+  const [issueBody, setIssueBody] = useState("");
+  const [issueLabels, setIssueLabels] = useState("enhancement");
+  const [issueFilter, setIssueFilter] = useState<"open" | "closed" | "all">("open");
+  const [selectedIssueNumber, setSelectedIssueNumber] = useState<number | null>(null);
+  const [issueComment, setIssueComment] = useState("");
+  const [issuesLoading, setIssuesLoading] = useState(false);
+  const [issueMutation, setIssueMutation] = useState(false);
+  const [issueError, setIssueError] = useState("");
+  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
+  const [actionsLoading, setActionsLoading] = useState(false);
+  const [runningWorkflow, setRunningWorkflow] = useState(false);
+  const [actionsError, setActionsError] = useState("");
   const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
   const sync = useRoomSync(roomSlug(`${repository?.branch ?? "main"}:${activeFile}`), activeContent);
   const audio = useAudioRoom("synapse-ai", sync.selfId, sync.presence);
@@ -151,7 +165,12 @@ export default function Home() {
   const actualPeers = Math.max(1, sync.presence.length);
   const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
+  const openIssues = issues.filter((issue) => issue.status === "open").length;
+  const filteredIssues = issues.filter((issue) => issueFilter === "all" || issue.status === issueFilter);
+  const selectedIssue = issues.find((issue) => issue.number === selectedIssueNumber) ?? filteredIssues[0] ?? null;
   const selectedFinding = analysis?.findings.find((finding) => finding.id === selectedFindingId) ?? analysis?.findings[0];
+  const repositoryOwner = repository?.owner;
+  const repositoryName = repository?.name;
 
   useEffect(() => {
     let cancelled = false;
@@ -170,15 +189,43 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const shortcut = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        void openMeshAI();
+    if (!repositoryOwner || !repositoryName || (activeNav !== "Issues" && activeNav !== "Actions")) return;
+    let cancelled = false;
+    const load = async () => {
+      if (activeNav === "Issues") {
+        setIssuesLoading(true);
+        setIssueError("");
+        try {
+          const response = await fetch(`/api/repos/${repositoryOwner}/${repositoryName}/issues`, { cache: "no-store" });
+          const result = await response.json() as RepositoryIssue[] | { error: string };
+          if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issues could not be loaded");
+          if (!cancelled) {
+            setIssues(result);
+            setSelectedIssueNumber((current) => result.some((issue) => issue.number === current) ? current : result[0]?.number ?? null);
+          }
+        } catch (cause) {
+          if (!cancelled) setIssueError(cause instanceof Error ? cause.message : "Issues could not be loaded");
+        } finally {
+          if (!cancelled) setIssuesLoading(false);
+        }
+      } else {
+        setActionsLoading(true);
+        setActionsError("");
+        try {
+          const response = await fetch(`/api/repos/${repositoryOwner}/${repositoryName}/actions`, { cache: "no-store" });
+          const result = await response.json() as WorkflowRun[] | { error: string };
+          if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow runs could not be loaded");
+          if (!cancelled) setWorkflowRuns(result);
+        } catch (cause) {
+          if (!cancelled) setActionsError(cause instanceof Error ? cause.message : "Workflow runs could not be loaded");
+        } finally {
+          if (!cancelled) setActionsLoading(false);
+        }
       }
     };
-    window.addEventListener("keydown", shortcut);
-    return () => window.removeEventListener("keydown", shortcut);
-  });
+    void load();
+    return () => { cancelled = true; };
+  }, [activeNav, repositoryOwner, repositoryName]);
 
   const workingSnapshot = repository?.files.map((file) => ({
     path: file.path,
@@ -316,6 +363,130 @@ export default function Home() {
     }
   }
 
+  async function loadIssues() {
+    if (!repository || issuesLoading) return;
+    setIssuesLoading(true);
+    setIssueError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues`, { cache: "no-store" });
+      const result = await response.json() as RepositoryIssue[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issues could not be loaded");
+      setIssues(result);
+      setSelectedIssueNumber((current) => result.some((issue) => issue.number === current) ? current : result[0]?.number ?? null);
+    } catch (cause) {
+      setIssueError(cause instanceof Error ? cause.message : "Issues could not be loaded");
+    } finally {
+      setIssuesLoading(false);
+    }
+  }
+
+  async function createIssue(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !issueTitle.trim() || issueMutation) return;
+    setIssueMutation(true);
+    setIssueError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: issueTitle, body: issueBody, author: "Achal Sood",
+          labels: issueLabels.split(",").map((label) => label.trim()).filter(Boolean),
+        }),
+      });
+      const result = await response.json() as RepositoryIssue[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issue could not be created");
+      setIssues(result);
+      setIssueTitle("");
+      setIssueBody("");
+      setIssueLabels("enhancement");
+      setIssueFilter("open");
+      setSelectedIssueNumber(result[0]?.number ?? null);
+      flash(`Opened issue #${result[0]?.number ?? ""}`);
+    } catch (cause) {
+      setIssueError(cause instanceof Error ? cause.message : "Issue could not be created");
+    } finally {
+      setIssueMutation(false);
+    }
+  }
+
+  async function changeIssueStatus(issue: RepositoryIssue) {
+    if (!repository || issueMutation) return;
+    setIssueMutation(true);
+    setIssueError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues/${issue.number}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: issue.status === "open" ? "closed" : "open" }),
+      });
+      const result = await response.json() as RepositoryIssue[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Issue could not be updated");
+      setIssues(result);
+      flash(`${issue.status === "open" ? "Closed" : "Reopened"} issue #${issue.number}`);
+    } catch (cause) {
+      setIssueError(cause instanceof Error ? cause.message : "Issue could not be updated");
+    } finally {
+      setIssueMutation(false);
+    }
+  }
+
+  async function addIssueComment(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !selectedIssue || !issueComment.trim() || issueMutation) return;
+    setIssueMutation(true);
+    setIssueError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues/${selectedIssue.number}/comments`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body: issueComment, author: "Achal Sood" }),
+      });
+      const result = await response.json() as RepositoryIssue[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Comment could not be added");
+      setIssues(result);
+      setIssueComment("");
+      flash(`Commented on issue #${selectedIssue.number}`);
+    } catch (cause) {
+      setIssueError(cause instanceof Error ? cause.message : "Comment could not be added");
+    } finally {
+      setIssueMutation(false);
+    }
+  }
+
+  async function loadActions() {
+    if (!repository || actionsLoading) return;
+    setActionsLoading(true);
+    setActionsError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/actions`, { cache: "no-store" });
+      const result = await response.json() as WorkflowRun[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow runs could not be loaded");
+      setWorkflowRuns(result);
+    } catch (cause) {
+      setActionsError(cause instanceof Error ? cause.message : "Workflow runs could not be loaded");
+    } finally {
+      setActionsLoading(false);
+    }
+  }
+
+  async function runWorkflow() {
+    if (!repository || runningWorkflow) return;
+    setRunningWorkflow(true);
+    setActionsError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/actions`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: repository.branch, author: "Achal Sood" }),
+      });
+      const result = await response.json() as WorkflowRun[] | { error: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow could not be started");
+      setWorkflowRuns(result);
+      flash(`Mesh CI ${result[0]?.status === "success" ? "passed" : "found an issue"}`);
+    } catch (cause) {
+      setActionsError(cause instanceof Error ? cause.message : "Workflow could not be started");
+    } finally {
+      setRunningWorkflow(false);
+    }
+  }
+
   async function runMeshAnalysis() {
     if (!repository || analyzing) return;
     setAnalyzing(true);
@@ -341,6 +512,17 @@ export default function Home() {
     setActiveNav("Code");
     if (!analysis && repository) await runMeshAnalysis();
   }
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        void openMeshAI();
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  });
 
   function applySuggestion(finding: AnalysisFinding) {
     if (!finding.patch) return;
@@ -388,7 +570,7 @@ export default function Home() {
           </div>}
         </div>
         <nav className="nav-tabs" aria-label="Repository navigation">
-          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => { setActiveNav(item); setBranchMenuOpen(false); if (item === "Pull requests") setHistoryOpen(false); }}>{item}{item === "Pull requests" && openPulls > 0 && <span className="nav-count">{openPulls}</span>}</button>)}
+          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => { setActiveNav(item); setBranchMenuOpen(false); setHistoryOpen(false); setAiOpen(false); }}>{item}{item === "Issues" && openIssues > 0 && <span className="nav-count">{openIssues}</span>}{item === "Pull requests" && openPulls > 0 && <span className="nav-count">{openPulls}</span>}{item === "Actions" && workflowRuns[0]?.status === "failure" && <span className="nav-count alert">!</span>}</button>)}
         </nav>
         <div className="top-presence" aria-label={`${actualPeers} realtime peers online`}>
           {(sync.presence.length ? sync.presence : [{ clientId: "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => <span className={`avatar sm ${person.color}`} key={person.clientId}>{person.name.slice(0, 2).toUpperCase()}<i /></span>)}
@@ -480,6 +662,54 @@ export default function Home() {
                   {pull.status === "open" && <footer><span>{pull.mergeable ? "Base is unchanged · ready to merge" : "Base moved · rebase required"}</span><button disabled={!pull.mergeable || mergingNumber !== null} onClick={() => void mergePullRequest(pull.number)}>{mergingNumber === pull.number ? "Merging…" : "Merge pull request"}</button></footer>}
                   {pull.status === "merged" && <footer className="merged-footer"><span>Merged {pull.mergedAt ? new Date(pull.mergedAt).toLocaleString() : ""}</span><code>{pull.mergeCommitOid?.slice(0, 8)}</code></footer>}
                 </article>) : <div className="empty-pulls"><Icon name="branch" size={30}/><strong>No pull requests yet</strong><span>Create a feature branch, commit a change, then open your first review.</span></div>}
+              </section>
+            </div>
+          </aside>}
+          {activeNav === "Issues" && <aside className="product-drawer issues-drawer" aria-label="Repository issues">
+            <header><div><Icon name="activity"/><div><strong>Issues</strong><span>Track bugs, enhancements, decisions, and follow-up work</span></div></div><button onClick={() => setActiveNav("Code")} aria-label="Close issues">×</button></header>
+            {issueError && <div className="drawer-error" role="alert">{issueError}</div>}
+            <div className="issues-content">
+              <form className="issue-create" onSubmit={createIssue}>
+                <div><strong>Open a new issue</strong><span>Issues are stored with the repository and shared with the team.</span></div>
+                <label><span>Title</span><input value={issueTitle} onChange={(event) => setIssueTitle(event.target.value)} placeholder="What needs attention?" maxLength={160}/></label>
+                <label><span>Description</span><textarea value={issueBody} onChange={(event) => setIssueBody(event.target.value)} placeholder="Add context, expected behavior, or acceptance criteria." maxLength={5000}/></label>
+                <label><span>Labels</span><input value={issueLabels} onChange={(event) => setIssueLabels(event.target.value)} placeholder="bug, performance" maxLength={180}/><small>Comma-separated · up to six labels</small></label>
+                <button disabled={!issueTitle.trim() || issueMutation}>{issueMutation ? "Saving…" : "Open issue"}</button>
+              </form>
+              <section className="issues-browser">
+                <div className="issue-toolbar"><div>{(["open", "closed", "all"] as const).map((filter) => <button key={filter} className={issueFilter === filter ? "active" : ""} onClick={() => setIssueFilter(filter)}>{filter}<span>{filter === "all" ? issues.length : issues.filter((issue) => issue.status === filter).length}</span></button>)}</div><button onClick={() => void loadIssues()} disabled={issuesLoading}>{issuesLoading ? "Refreshing…" : "Refresh"}</button></div>
+                <div className="issue-workspace">
+                  <div className="issue-list">
+                    {filteredIssues.map((issue) => <button key={issue.number} className={selectedIssue?.number === issue.number ? "active" : ""} onClick={() => setSelectedIssueNumber(issue.number)}><i className={issue.status}/><div><strong>{issue.title}</strong><span>#{issue.number} opened by {issue.author}</span><p>{issue.labels.map((label) => <em key={label}>{label}</em>)}</p></div><b>{issue.comments.length}</b></button>)}
+                    {!issuesLoading && !filteredIssues.length && <div className="empty-issues"><Icon name="check" size={28}/><strong>No {issueFilter === "all" ? "" : issueFilter} issues</strong><span>Use the form to capture the next piece of work.</span></div>}
+                  </div>
+                  {selectedIssue ? <article className="issue-detail">
+                    <header><div><span className={`issue-state ${selectedIssue.status}`}>{selectedIssue.status}</span><code>#{selectedIssue.number}</code></div><button onClick={() => void changeIssueStatus(selectedIssue)} disabled={issueMutation}>{selectedIssue.status === "open" ? "Close issue" : "Reopen issue"}</button></header>
+                    <h2>{selectedIssue.title}</h2>
+                    <div className="issue-author"><span className="avatar xs mint">AS</span><p><strong>{selectedIssue.author}</strong> opened this issue · {new Date(selectedIssue.createdAt).toLocaleString()}</p></div>
+                    <p className="issue-description">{selectedIssue.body || "No description was provided."}</p>
+                    <div className="issue-labels">{selectedIssue.labels.map((label) => <span key={label}>{label}</span>)}</div>
+                    <section className="issue-comments"><h3>Discussion <span>{selectedIssue.comments.length}</span></h3>{selectedIssue.comments.map((comment) => <article key={comment.id}><span className="avatar xs violet">{comment.author.slice(0, 2).toUpperCase()}</span><div><header><strong>{comment.author}</strong><time>{new Date(comment.createdAt).toLocaleString()}</time></header><p>{comment.body}</p></div></article>)}</section>
+                    <form className="comment-form" onSubmit={addIssueComment}><textarea value={issueComment} onChange={(event) => setIssueComment(event.target.value)} placeholder="Add to the discussion…" maxLength={3000}/><button disabled={!issueComment.trim() || issueMutation}>{issueMutation ? "Posting…" : "Comment"}</button></form>
+                  </article> : <div className="empty-issues detail"><Icon name="activity" size={28}/><strong>Select an issue</strong><span>Open an issue to view its details and discussion.</span></div>}
+                </div>
+              </section>
+            </div>
+          </aside>}
+          {activeNav === "Actions" && <aside className="product-drawer actions-drawer" aria-label="Repository actions">
+            <header><div><Icon name="radio"/><div><strong>Actions</strong><span>Self-hosted repository checks · no external CI service</span></div></div><div><button className="run-workflow" onClick={() => void runWorkflow()} disabled={runningWorkflow || !repository}>{runningWorkflow ? "Running…" : "Run workflow"}</button><button onClick={() => setActiveNav("Code")} aria-label="Close actions">×</button></div></header>
+            {actionsError && <div className="drawer-error" role="alert">{actionsError}</div>}
+            <div className="actions-content">
+              <aside className="workflow-sidebar"><strong>Workflows</strong><button className="active"><Icon name="activity" size={15}/><div><span>Mesh CI</span><small>Repository quality gate</small></div></button><footer><span>Triggers</span><code>push · manual</code></footer></aside>
+              <section className="run-list">
+                <header><div><strong>Workflow runs</strong><span>{repository?.owner}/{repository?.name} · {repository?.branch}</span></div><button onClick={() => void loadActions()} disabled={actionsLoading}>{actionsLoading ? "Refreshing…" : "Refresh"}</button></header>
+                {workflowRuns.map((run) => <article className={`workflow-run ${run.status}`} key={run.id}>
+                  <details open={run.id === workflowRuns[0]?.id}>
+                    <summary><span className={`run-icon ${run.status}`}>{run.status === "success" ? "✓" : "×"}</span><div><strong>{run.workflow}</strong><span>Run #{run.id} · {run.trigger} by {run.author}</span></div><code>{run.commitOid.slice(0, 8)}</code><time>{run.durationMs}ms</time><b>{new Date(run.createdAt).toLocaleString()}</b></summary>
+                    <div className="run-steps">{run.steps.map((step, index) => <article key={`${step.name}-${index}`}><span className={step.status}>{step.status === "success" ? "✓" : "×"}</span><div><header><strong>{step.name}</strong><time>{step.durationMs}ms</time></header><pre>{step.logs.join("\n")}</pre></div></article>)}</div>
+                  </details>
+                </article>)}
+                {!actionsLoading && !workflowRuns.length && <div className="empty-actions"><Icon name="activity" size={30}/><strong>No workflow runs yet</strong><span>Run Mesh CI against the current branch to create the first result.</span><button onClick={() => void runWorkflow()}>Run workflow</button></div>}
               </section>
             </div>
           </aside>}

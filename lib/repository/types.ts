@@ -55,6 +55,48 @@ export interface PullRequest {
   diffs: FileDiff[];
 }
 
+export interface IssueComment {
+  id: number;
+  author: string;
+  body: string;
+  createdAt: number;
+}
+
+export interface RepositoryIssue {
+  number: number;
+  title: string;
+  body: string;
+  status: "open" | "closed";
+  author: string;
+  assignee: string | null;
+  labels: string[];
+  createdAt: number;
+  updatedAt: number;
+  closedAt: number | null;
+  comments: IssueComment[];
+}
+
+export interface WorkflowStep {
+  name: string;
+  status: "success" | "failure";
+  durationMs: number;
+  logs: string[];
+}
+
+export interface WorkflowRun {
+  id: number;
+  workflow: string;
+  status: "success" | "failure";
+  trigger: "push" | "manual";
+  branch: string;
+  commitOid: string;
+  author: string;
+  createdAt: number;
+  completedAt: number;
+  durationMs: number;
+  steps: WorkflowStep[];
+}
+
 export interface RepositorySnapshot {
   owner: string;
   name: string;

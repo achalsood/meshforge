@@ -1,7 +1,11 @@
+import { evaluateRepositoryWorkflow } from "../actions/workflow-engine";
 import { myersDiffStats } from "../repository/myers-diff";
 import { pullRequestMergeability } from "../repository/merge-policy";
 import { repositoryObjectId, utf8Bytes } from "../repository/object-id";
-import type { FileDiff, PullRequest, RepositoryBranch, RepositoryCommit, RepositoryFile, RepositorySnapshot } from "../repository/types";
+import type {
+  FileDiff, IssueComment, PullRequest, RepositoryBranch, RepositoryCommit, RepositoryFile,
+  RepositoryIssue, RepositorySnapshot, WorkflowRun, WorkflowStep,
+} from "../repository/types";
 
 const INITIAL_FILES = [
   {
@@ -137,6 +141,46 @@ export async function ensureRepositorySchema(db: D1Database): Promise<void> {
         UNIQUE(repository_id, number)
       )`),
       db.prepare("CREATE INDEX IF NOT EXISTS repo_pull_requests_repo_status_idx ON repo_pull_requests (repository_id, status)"),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repo_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository_id INTEGER NOT NULL,
+        number INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        author TEXT NOT NULL,
+        assignee TEXT,
+        labels TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        closed_at INTEGER,
+        UNIQUE(repository_id, number)
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repo_issues_repo_status_updated_idx ON repo_issues (repository_id, status, updated_at DESC)"),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repo_issue_comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository_id INTEGER NOT NULL,
+        issue_number INTEGER NOT NULL,
+        author TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repo_issue_comments_issue_idx ON repo_issue_comments (repository_id, issue_number, created_at)"),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repo_workflow_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository_id INTEGER NOT NULL,
+        workflow TEXT NOT NULL,
+        status TEXT NOT NULL,
+        trigger TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        commit_oid TEXT NOT NULL,
+        author TEXT NOT NULL,
+        steps TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER NOT NULL
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repo_workflow_runs_repo_created_idx ON repo_workflow_runs (repository_id, created_at DESC)"),
     ]).then(() => undefined).catch((error) => {
       repositorySchemaReady = null;
       throw error;
@@ -424,6 +468,7 @@ export async function mergeRepositoryPullRequest(db: D1Database, owner: string, 
   await db.prepare(`UPDATE repo_pull_requests SET status = 'merged', head_oid = ?, merged_at = ?, updated_at = ?, merge_commit_oid = ?
     WHERE repository_id = ? AND number = ? AND status = 'open'`)
     .bind(head.commit_oid, now, now, mergeOid, repository.id, number).run();
+  await createWorkflowRun(db, repository, pull.base_branch, mergeOid, author, "push", headFiles);
   return getRepositorySnapshot(db, owner, name, pull.base_branch);
 }
 
@@ -438,6 +483,163 @@ export async function commitRepository(db: D1Database, owner: string, name: stri
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
   if (input.expectedHeadOid && head?.commit_oid !== input.expectedHeadOid) throw new Error("Branch moved; reload before committing");
-  await createSnapshotCommit(db, repository, branch, input.author || "Achal Sood", input.message?.trim() || "Update collaborative workspace", files);
+  const author = input.author || "Achal Sood";
+  const commitOid = await createSnapshotCommit(db, repository, branch, author, input.message?.trim() || "Update collaborative workspace", files);
+  await createWorkflowRun(db, repository, branch, commitOid, author, "push", files);
   return getRepositorySnapshot(db, owner, name, branch);
+}
+
+interface IssueRow {
+  number: number; title: string; body: string; status: "open" | "closed"; author: string;
+  assignee: string | null; labels: string; created_at: number; updated_at: number; closed_at: number | null;
+}
+
+interface IssueCommentRow {
+  id: number; issue_number: number; author: string; body: string; created_at: number;
+}
+
+function normalizeLabels(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return [...new Set(input.map((label) => String(label).trim().toLowerCase()).filter(Boolean))]
+    .slice(0, 6)
+    .map((label) => label.slice(0, 28));
+}
+
+export async function listRepositoryIssues(db: D1Database, owner: string, name: string): Promise<RepositoryIssue[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const [issuesResult, commentsResult] = await Promise.all([
+    db.prepare(`SELECT number, title, body, status, author, assignee, labels, created_at, updated_at, closed_at
+      FROM repo_issues WHERE repository_id = ? ORDER BY updated_at DESC, number DESC LIMIT 100`)
+      .bind(repository.id).all<IssueRow>(),
+    db.prepare(`SELECT id, issue_number, author, body, created_at FROM repo_issue_comments
+      WHERE repository_id = ? ORDER BY created_at ASC LIMIT 500`).bind(repository.id).all<IssueCommentRow>(),
+  ]);
+  const comments = new Map<number, IssueComment[]>();
+  for (const row of commentsResult.results ?? []) {
+    const current = comments.get(row.issue_number) ?? [];
+    current.push({ id: row.id, author: row.author, body: row.body, createdAt: row.created_at });
+    comments.set(row.issue_number, current);
+  }
+  return (issuesResult.results ?? []).map((row) => {
+    let labels: string[] = [];
+    try { labels = normalizeLabels(JSON.parse(row.labels)); } catch { labels = []; }
+    return {
+      number: row.number, title: row.title, body: row.body, status: row.status, author: row.author,
+      assignee: row.assignee, labels, createdAt: row.created_at, updatedAt: row.updated_at,
+      closedAt: row.closed_at, comments: comments.get(row.number) ?? [],
+    };
+  });
+}
+
+export async function createRepositoryIssue(db: D1Database, owner: string, name: string, input: {
+  title?: string; body?: string; author?: string; assignee?: string; labels?: unknown;
+}): Promise<RepositoryIssue[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const title = input.title?.trim();
+  if (!title) throw new Error("Issue title is required");
+  const numberRow = await db.prepare("SELECT COALESCE(MAX(number), 0) + 1 next_number FROM repo_issues WHERE repository_id = ?")
+    .bind(repository.id).first<{ next_number: number }>();
+  const now = Date.now();
+  await db.prepare(`INSERT INTO repo_issues
+    (repository_id, number, title, body, status, author, assignee, labels, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`)
+    .bind(repository.id, Number(numberRow?.next_number ?? 1), title.slice(0, 160), (input.body ?? "").trim().slice(0, 5000),
+      (input.author || "Achal Sood").slice(0, 80), input.assignee?.trim().slice(0, 80) || null,
+      JSON.stringify(normalizeLabels(input.labels)), now, now).run();
+  return listRepositoryIssues(db, owner, name);
+}
+
+export async function updateRepositoryIssue(db: D1Database, owner: string, name: string, number: number, input: {
+  status?: "open" | "closed"; assignee?: string | null; labels?: unknown;
+}): Promise<RepositoryIssue[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const issue = await db.prepare("SELECT number, status, assignee, labels FROM repo_issues WHERE repository_id = ? AND number = ?")
+    .bind(repository.id, number).first<{ number: number; status: "open" | "closed"; assignee: string | null; labels: string }>();
+  if (!issue) throw new Error("Issue not found");
+  const status = input.status === "closed" ? "closed" : input.status === "open" ? "open" : issue.status;
+  const now = Date.now();
+  await db.prepare(`UPDATE repo_issues SET status = ?, assignee = ?, labels = ?, updated_at = ?, closed_at = ?
+    WHERE repository_id = ? AND number = ?`)
+    .bind(status, input.assignee === undefined ? issue.assignee : input.assignee?.trim().slice(0, 80) || null,
+      input.labels === undefined ? issue.labels : JSON.stringify(normalizeLabels(input.labels)),
+      now, status === "closed" ? now : null, repository.id, number).run();
+  return listRepositoryIssues(db, owner, name);
+}
+
+export async function addRepositoryIssueComment(db: D1Database, owner: string, name: string, number: number, input: {
+  body?: string; author?: string;
+}): Promise<RepositoryIssue[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const issue = await db.prepare("SELECT number FROM repo_issues WHERE repository_id = ? AND number = ?")
+    .bind(repository.id, number).first<{ number: number }>();
+  if (!issue) throw new Error("Issue not found");
+  const body = input.body?.trim();
+  if (!body) throw new Error("Comment cannot be empty");
+  const now = Date.now();
+  await db.batch([
+    db.prepare(`INSERT INTO repo_issue_comments (repository_id, issue_number, author, body, created_at)
+      VALUES (?, ?, ?, ?, ?)`).bind(repository.id, number, (input.author || "Achal Sood").slice(0, 80), body.slice(0, 3000), now),
+    db.prepare("UPDATE repo_issues SET updated_at = ? WHERE repository_id = ? AND number = ?").bind(now, repository.id, number),
+  ]);
+  return listRepositoryIssues(db, owner, name);
+}
+
+interface WorkflowRunRow {
+  id: number; workflow: string; status: "success" | "failure"; trigger: "push" | "manual";
+  branch: string; commit_oid: string; author: string; steps: string; duration_ms: number;
+  created_at: number; completed_at: number;
+}
+
+async function createWorkflowRun(
+  db: D1Database,
+  repository: RepositoryRow,
+  branch: string,
+  commitOid: string,
+  author: string,
+  trigger: "push" | "manual",
+  files?: Array<{ path: string; content: string }>,
+): Promise<void> {
+  const sourceFiles = files ?? await filesAtCommit(db, commitOid);
+  const evaluation = evaluateRepositoryWorkflow(sourceFiles);
+  const createdAt = Date.now();
+  await db.prepare(`INSERT INTO repo_workflow_runs
+    (repository_id, workflow, status, trigger, branch, commit_oid, author, steps, duration_ms, created_at, completed_at)
+    VALUES (?, 'Mesh CI', ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(repository.id, evaluation.status, trigger, branch, commitOid, author.slice(0, 80),
+      JSON.stringify(evaluation.steps), evaluation.durationMs, createdAt, createdAt + evaluation.durationMs).run();
+}
+
+export async function listRepositoryWorkflowRuns(db: D1Database, owner: string, name: string): Promise<WorkflowRun[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const existing = await db.prepare("SELECT id FROM repo_workflow_runs WHERE repository_id = ? LIMIT 1")
+    .bind(repository.id).first<{ id: number }>();
+  if (!existing) {
+    const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
+      .bind(repository.id, repository.default_branch).first<HeadRow>();
+    if (head) await createWorkflowRun(db, repository, repository.default_branch, head.commit_oid, "MeshForge", "push");
+  }
+  const result = await db.prepare(`SELECT id, workflow, status, trigger, branch, commit_oid, author, steps,
+    duration_ms, created_at, completed_at FROM repo_workflow_runs
+    WHERE repository_id = ? ORDER BY created_at DESC, id DESC LIMIT 50`).bind(repository.id).all<WorkflowRunRow>();
+  return (result.results ?? []).map((row) => {
+    let steps: WorkflowStep[] = [];
+    try { steps = JSON.parse(row.steps) as WorkflowStep[]; } catch { steps = []; }
+    return {
+      id: row.id, workflow: row.workflow, status: row.status, trigger: row.trigger, branch: row.branch,
+      commitOid: row.commit_oid, author: row.author, steps, durationMs: row.duration_ms,
+      createdAt: row.created_at, completedAt: row.completed_at,
+    };
+  });
+}
+
+export async function runRepositoryWorkflow(db: D1Database, owner: string, name: string, input: {
+  branch?: string; author?: string;
+}): Promise<WorkflowRun[]> {
+  const repository = await ensureSeedRepository(db, owner, name);
+  const branch = branchName(input.branch || repository.default_branch);
+  const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
+    .bind(repository.id, branch).first<HeadRow>();
+  if (!head) throw new Error("Branch not found");
+  await createWorkflowRun(db, repository, branch, head.commit_oid, input.author || "Achal Sood", "manual");
+  return listRepositoryWorkflowRuns(db, owner, name);
 }

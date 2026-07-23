@@ -17,6 +17,8 @@
 | Room coordinator | Order broadcasts, retain hot state, issue snapshots | Durable stateful worker |
 | Collaboration core | RGA operations, dependency queues, replay, compaction | TypeScript library (core implemented) |
 | Repository service | Content-addressed blobs and trees, commit DAGs, refs, pull requests, diffs | Worker API + D1 (implemented) |
+| Work tracking | Repository issues, labels, comments, and lifecycle state | Worker API + D1 (implemented) |
+| Automation | Push/manual quality-gate workflows with durable step logs | Worker evaluator + D1 (implemented) |
 | Media plane | Audio transport, short-lived signaling, mute state, and active-speaker metering | WebRTC mesh + HTTP signaling (implemented); SFU at scale |
 | Mesh Intelligence | Dependency graph, code-risk rules, duplicate detection, ranked deterministic patches | TypeScript analysis engine inside the Worker (implemented) |
 

@@ -25,6 +25,8 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Working room chat composer
 - Peer-to-peer WebRTC audio with short-lived room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
 - Self-contained Mesh Intelligence review with stack-based syntax preflight, exact error locations, dependency graphs, complexity hotspots, security/performance rules, duplicate-code detection, and deterministic patches
+- Durable repository issues with labels, comments, filters, and open/closed lifecycle controls
+- Self-hosted Mesh CI actions with push/manual triggers, syntax quality gates, test discovery, step logs, and persistent run history
 - CRDT throughput, peer count, connection, and p95 latency telemetry
 - Responsive layout that preserves the editor and collapses secondary panels
 
@@ -54,9 +56,10 @@ This structure avoids repeatedly scanning the entire document when translating b
 
 1. **Experience prototype** — current interactive workspace.
 2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
-3. **Source management** — implemented repository snapshots, content-addressed objects, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, deduplication metrics, and stale-base protection. Next: multiple repositories, conflict-aware rebasing, review comments, and permissions.
+3. **Source management** — implemented repository snapshots, content-addressed objects, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, deduplication metrics, durable issues, and stale-base protection. Next: multiple repositories, conflict-aware rebasing, review comments, and permissions.
 4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
 5. **Repository intelligence** — implemented local dependency analysis, risk ranking, rolling-hash duplicate detection, complexity hotspots, and deterministic patch generation with no external API dependency. Next: language-aware parsers, test-impact analysis, and an offline open-weight model option.
+6. **Automation** — implemented self-hosted Mesh CI runs on commits, merges, and manual dispatch. The deterministic workflow records checkout validation, syntax preflight, test discovery, repository intelligence, timing, logs, and pass/fail state in D1. Next: repository-defined workflow files, isolated command execution, and dependency-aware test selection.
 6. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
 
 ## Run locally
