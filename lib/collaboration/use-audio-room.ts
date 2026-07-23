@@ -12,7 +12,16 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun1.l.google.com:19302" },
 ];
 
-export function useAudioRoom(roomId: string, selfId: string, presence: PresenceRecord[]) {
+interface AudioRoomAccess {
+  owner: string;
+  repository: string;
+  scope: string;
+  enabled: boolean;
+}
+
+export function useAudioRoom(roomId: string, selfId: string, presence: PresenceRecord[], access: AudioRoomAccess) {
+  const { owner, repository, scope, enabled } = access;
+  const repositoryQuery = `owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repository)}&scope=${encodeURIComponent(scope)}`;
   const [status, setStatus] = useState<AudioStatus>("idle");
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
@@ -28,13 +37,13 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
 
   const sendSignal = useCallback(async (signal: WebRTCSignal, targetClientId?: string) => {
     const packet: RealtimeSignal = { type: "signal", roomId, clientId: selfId, targetClientId, signal };
-    const response = await fetch(`/api/rooms/${roomId}/signals`, {
+    const response = await fetch(`/api/rooms/${roomId}/signals?${repositoryQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(packet),
     });
     if (!response.ok) throw new Error("Audio signaling request failed");
-  }, [roomId, selfId]);
+  }, [repositoryQuery, roomId, selfId]);
 
   const removePeer = useCallback((peerId: string) => {
     peers.current.get(peerId)?.close();
@@ -148,7 +157,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
   }, [removePeer, sendSignal]);
 
   const join = useCallback(async () => {
-    if (!selfId || status === "requesting" || status === "connecting" || status === "connected") return;
+    if (!enabled || !selfId || status === "requesting" || status === "connecting" || status === "connected") return;
     setStatus("requesting");
     setError("");
     try {
@@ -174,7 +183,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       setStatus("connecting");
       const controller = new AbortController();
       signaling.current = controller;
-      const baselineResponse = await fetch(`/api/rooms/${roomId}/signals?since=0`, {
+      const baselineResponse = await fetch(`/api/rooms/${roomId}/signals?since=0&${repositoryQuery}`, {
         cache: "no-store",
         signal: controller.signal,
       });
@@ -196,7 +205,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       const poll = async () => {
         while (!controller.signal.aborted) {
           try {
-            const response = await fetch(`/api/rooms/${roomId}/signals?since=${signalSequence.current}`, {
+            const response = await fetch(`/api/rooms/${roomId}/signals?since=${signalSequence.current}&${repositoryQuery}`, {
               cache: "no-store",
               signal: controller.signal,
             });
@@ -233,7 +242,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       setError(message);
       setStatus("error");
     }
-  }, [createOffer, handleSignal, presence, roomId, selfId, sendSignal, status]);
+  }, [createOffer, enabled, handleSignal, presence, repositoryQuery, roomId, selfId, sendSignal, status]);
 
   const toggleMute = useCallback(() => {
     const next = !muted;

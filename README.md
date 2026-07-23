@@ -1,8 +1,8 @@
 # MeshForge
 
-MeshForge is a portfolio-grade collaborative source workspace: repository navigation, multiplayer editing, presence, room chat, voice controls, performance telemetry, and AI-assisted code review in one focused interface.
+MeshForge is a portfolio-grade collaborative source workspace: multi-repository navigation, role-based access, multiplayer editing, presence, room chat, voice controls, performance telemetry, and self-contained code intelligence in one focused interface.
 
-The current milestone is an interactive product slice. It proves the experience and interaction model while the realtime protocol, durable repository storage, and media plane are developed as independent services.
+The current milestone is a working multi-user product slice with authenticated identities, durable source history, repository invitations, and server-enforced permissions.
 
 ## Why this project
 
@@ -15,6 +15,10 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 ## Current experience
 
 - Signal Room collaborative workspace
+- ChatGPT-authenticated user profiles and server-attributed commits, pull requests, issues, comments, actions, and chat
+- Multiple repositories per account with owner, maintainer, contributor, and viewer roles
+- Email invitations, acceptance/decline flows, member role changes, and owner-protected membership
+- Server-side permission checks for commits, branches, pull requests, merges, issues, actions, chat, and audio rooms
 - Repository explorer and source editor
 - D1-backed repositories with SHA-256 content-addressed blobs, immutable tree snapshots, branch refs, and commit DAG history
 - Optimistic branch-head checks and Myers line-diff statistics for each commit
@@ -34,12 +38,14 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 
 ```mermaid
 flowchart TD
-  UI[Web workspace] --> GW[Realtime gateway]
+  UI[Web workspace] --> AUTH[Platform identity]
+  AUTH --> RBAC[Repository RBAC]
+  RBAC --> GW[Realtime gateway]
   GW --> DO[Room coordinator]
   DO --> CRDT[Sequence CRDT]
   DO --> BUS[Presence and chat]
   UI --> RTC[WebRTC media]
-  UI --> API[Repository API]
+  RBAC --> API[Repository API]
   API --> OBJ[Git objects]
   API --> AI[Mesh Intelligence engine]
 ```
@@ -56,11 +62,11 @@ This structure avoids repeatedly scanning the entire document when translating b
 
 1. **Experience prototype** — current interactive workspace.
 2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
-3. **Source management** — implemented repository snapshots, content-addressed objects, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, deduplication metrics, durable issues, and stale-base protection. Next: multiple repositories, conflict-aware rebasing, review comments, and permissions.
+3. **Source management** — implemented multiple repositories, authenticated authorship, owner/maintainer/contributor/viewer RBAC, repository invitations, content-addressed snapshots, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, durable issues, and stale-base protection. Next: conflict-aware rebasing and inline review comments.
 4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
 5. **Repository intelligence** — implemented local dependency analysis, risk ranking, rolling-hash duplicate detection, complexity hotspots, and deterministic patch generation with no external API dependency. Next: language-aware parsers, test-impact analysis, and an offline open-weight model option.
 6. **Automation** — implemented self-hosted Mesh CI runs on commits, merges, and manual dispatch. The deterministic workflow records checkout validation, syntax preflight, test discovery, repository intelligence, timing, logs, and pass/fail state in D1. Next: repository-defined workflow files, isolated command execution, and dependency-aware test selection.
-6. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
+7. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
 
 ## Run locally
 

@@ -3,6 +3,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
+import { roomSlug } from "@/lib/collaboration/room-id";
+import type { RepositoryPermission, RepositoryRole } from "@/lib/auth/permissions";
+import type { RepositoryMember, SessionPayload, TeamPayload } from "@/lib/auth/types";
 import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
 import type { RepositoryIssue, RepositorySnapshot, WorkflowRun } from "@/lib/repository/types";
 
@@ -40,12 +43,6 @@ const paths: Record<IconName, string> = {
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;
 }
-
-const initialMessages = [
-  { who: "Maya", initials: "MK", color: "coral", time: "10:21", body: "I’m bumping efSearch to 128. Recall was dipping on the dev set." },
-  { who: "Noah", initials: "NP", color: "violet", time: "10:22", body: "Good call. I’ll add an adaptive efSearch based on query norm." },
-  { who: "Alex", initials: "AC", color: "lilac", time: "10:23", body: "Let’s log recall@10 beside latency so we can plot the curve." },
-];
 
 const INITIAL_CODE = `import { cosineSim, L2Distance } from "../utils/distance";
 import { MaxHeap } from "../utils/heap";
@@ -103,13 +100,20 @@ function buildTree(paths: string[]): TreeItem[] {
   return items;
 }
 
-function roomSlug(path: string): string {
-  let hash = 2166136261;
-  for (const character of path) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
-  return `synapse-${(hash >>> 0).toString(16)}`;
-}
-
 export default function Home() {
+  const [session, setSession] = useState<SessionPayload | null>(null);
+  const [authState, setAuthState] = useState<"loading" | "ready" | "required" | "error">("loading");
+  const [authError, setAuthError] = useState("");
+  const [repoMenuOpen, setRepoMenuOpen] = useState(false);
+  const [newRepositoryName, setNewRepositoryName] = useState("");
+  const [creatingRepository, setCreatingRepository] = useState(false);
+  const [teamOpen, setTeamOpen] = useState(false);
+  const [team, setTeam] = useState<TeamPayload | null>(null);
+  const [teamLoading, setTeamLoading] = useState(false);
+  const [teamError, setTeamError] = useState("");
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState<Exclude<RepositoryRole, "owner">>("contributor");
+  const [teamMutation, setTeamMutation] = useState(false);
   const [draft, setDraft] = useState("");
   const [aiOpen, setAiOpen] = useState(false);
   const [analysis, setAnalysis] = useState<RepositoryAnalysis | null>(null);
@@ -148,20 +152,32 @@ export default function Home() {
   const [actionsLoading, setActionsLoading] = useState(false);
   const [runningWorkflow, setRunningWorkflow] = useState(false);
   const [actionsError, setActionsError] = useState("");
+  const currentAccess = session?.repositories.find((candidate) => candidate.owner === repository?.owner && candidate.name === repository?.name);
+  const can = (permission: RepositoryPermission) => currentAccess?.permissions.includes(permission) ?? false;
   const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
-  const sync = useRoomSync(roomSlug(`${repository?.branch ?? "main"}:${activeFile}`), activeContent);
-  const audio = useAudioRoom("synapse-ai", sync.selfId, sync.presence);
+  const sync = useRoomSync(roomSlug(`${repository?.owner ?? "none"}:${repository?.name ?? "none"}:${repository?.branch ?? "main"}:${activeFile}`), activeContent, {
+    owner: repository?.owner ?? "",
+    repository: repository?.name ?? "",
+    scope: `${repository?.branch ?? "main"}:${activeFile}`,
+    displayName: session?.user.displayName ?? "Signed-in user",
+    initials: session?.user.initials ?? "MF",
+    canWrite: can("commit") && can("chat"),
+    enabled: authState === "ready" && Boolean(repository),
+  });
+  const audio = useAudioRoom(roomSlug(`${repository?.owner ?? "none"}:${repository?.name ?? "none"}:audio`), sync.selfId, sync.presence, {
+    owner: repository?.owner ?? "",
+    repository: repository?.name ?? "",
+    scope: "audio",
+    enabled: can("audio"),
+  });
   const tree = useMemo(() => buildTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
-  const messages = [
-    ...initialMessages,
-    ...sync.chats.map((message) => ({
+  const messages = sync.chats.map((message) => ({
       who: message.name,
       initials: message.initials,
       color: message.color,
       time: new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       body: message.body,
-    })),
-  ];
+    }));
   const actualPeers = Math.max(1, sync.presence.length);
   const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
@@ -174,17 +190,33 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
-    void fetch("/api/repos/achalsood/synapse-ai", { cache: "no-store" })
+    void fetch("/api/session", { cache: "no-store" })
       .then(async (response) => {
-        if (!response.ok) throw new Error("Repository could not be loaded");
-        return response.json() as Promise<RepositorySnapshot>;
+        if (response.status === 401) {
+          if (!cancelled) setAuthState("required");
+          return null;
+        }
+        if (!response.ok) throw new Error("Your MeshForge workspace could not be loaded");
+        return response.json() as Promise<SessionPayload>;
       })
-      .then((snapshot) => {
+      .then(async (nextSession) => {
+        if (cancelled || !nextSession) return;
+        setSession(nextSession);
+        setAuthState("ready");
+        const first = nextSession.repositories[0];
+        if (!first) return;
+        const response = await fetch(`/api/repos/${first.owner}/${first.name}`, { cache: "no-store" });
+        const result = await response.json() as RepositorySnapshot | { error: string };
+        if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository could not be loaded");
         if (cancelled) return;
-        setRepository(snapshot);
-        setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
+        setRepository(result);
+        setActiveFile((current) => result.files.some((file) => file.path === current) ? current : result.files[0]?.path ?? current);
       })
-      .catch((cause) => !cancelled && setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be loaded"));
+      .catch((cause) => {
+        if (cancelled) return;
+        setAuthState("error");
+        setAuthError(cause instanceof Error ? cause.message : "Your MeshForge workspace could not be loaded");
+      });
     return () => { cancelled = true; };
   }, []);
 
@@ -248,7 +280,7 @@ export default function Home() {
       const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/commits`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: repository.branch, expectedHeadOid: repository.headOid, author: "Achal Sood", message: commitMessage || `Update ${activeFile}`, files: workingSnapshot }),
+        body: JSON.stringify({ branch: repository.branch, expectedHeadOid: repository.headOid, message: commitMessage || `Update ${activeFile}`, files: workingSnapshot }),
       });
       const result = await response.json() as RepositorySnapshot | { error: string };
       if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Commit failed");
@@ -268,7 +300,136 @@ export default function Home() {
     setRepository(snapshot);
     setWorkingFiles({});
     setRepositoryError("");
+    setIssues([]);
+    setWorkflowRuns([]);
+    setTeam(null);
+    setTeamOpen(false);
     setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
+  }
+
+  async function selectRepository(owner: string, name: string) {
+    if (dirtyPaths.size) {
+      flash("Commit your working changes before switching repositories");
+      return;
+    }
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${owner}/${name}`, { cache: "no-store" });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository could not be loaded");
+      applyRepository(result);
+      setRepoMenuOpen(false);
+      setBranchMenuOpen(false);
+      setActiveNav("Code");
+      flash(`Opened ${owner}/${name}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be loaded");
+    }
+  }
+
+  async function createRepository(event: FormEvent) {
+    event.preventDefault();
+    if (!newRepositoryName.trim() || creatingRepository) return;
+    setCreatingRepository(true);
+    setRepositoryError("");
+    try {
+      const response = await fetch("/api/repositories", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newRepositoryName }),
+      });
+      const result = await response.json() as { session: SessionPayload; repository: RepositorySnapshot } | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository could not be created");
+      setSession(result.session);
+      applyRepository(result.repository);
+      setNewRepositoryName("");
+      setRepoMenuOpen(false);
+      flash(`Created ${result.repository.owner}/${result.repository.name}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be created");
+    } finally {
+      setCreatingRepository(false);
+    }
+  }
+
+  async function openTeam() {
+    if (!repository) return;
+    setTeamOpen(true);
+    setTeamLoading(true);
+    setTeamError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members`, { cache: "no-store" });
+      const result = await response.json() as TeamPayload | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository team could not be loaded");
+      setTeam(result);
+    } catch (cause) {
+      setTeamError(cause instanceof Error ? cause.message : "Repository team could not be loaded");
+    } finally {
+      setTeamLoading(false);
+    }
+  }
+
+  async function inviteMember(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !inviteEmail.trim() || teamMutation) return;
+    setTeamMutation(true);
+    setTeamError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
+      });
+      const result = await response.json() as TeamPayload | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Invitation could not be sent");
+      setTeam(result);
+      setInviteEmail("");
+      flash(`Invited ${inviteEmail.trim().toLowerCase()} as ${inviteRole}`);
+    } catch (cause) {
+      setTeamError(cause instanceof Error ? cause.message : "Invitation could not be sent");
+    } finally {
+      setTeamMutation(false);
+    }
+  }
+
+  async function respondToInvitation(invitationId: number, accept: boolean) {
+    if (teamMutation) return;
+    setTeamMutation(true);
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/invitations/${invitationId}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accept }),
+      });
+      const result = await response.json() as SessionPayload | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Invitation could not be updated");
+      const invitation = session?.invitations.find((candidate) => candidate.id === invitationId);
+      setSession(result);
+      if (accept && invitation) await selectRepository(invitation.owner, invitation.repositoryName);
+      flash(accept ? "Repository invitation accepted" : "Repository invitation declined");
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Invitation could not be updated");
+    } finally {
+      setTeamMutation(false);
+    }
+  }
+
+  async function changeMember(member: RepositoryMember, role: RepositoryRole | null) {
+    if (!repository || teamMutation) return;
+    setTeamMutation(true);
+    setTeamError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members/${member.userId}`, {
+        method: role ? "PATCH" : "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: role ? JSON.stringify({ role }) : undefined,
+      });
+      const result = await response.json() as TeamPayload | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Member could not be updated");
+      setTeam(result);
+      flash(role ? `${member.displayName} is now ${role}` : `${member.displayName} was removed`);
+    } catch (cause) {
+      setTeamError(cause instanceof Error ? cause.message : "Member could not be updated");
+    } finally {
+      setTeamMutation(false);
+    }
   }
 
   async function switchBranch(branch: string) {
@@ -330,7 +491,7 @@ export default function Home() {
     try {
       const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/pulls`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: prTitle, body: prBody, headBranch: pullHeadBranch, baseBranch: repository.defaultBranch, author: "Achal Sood" }),
+        body: JSON.stringify({ title: prTitle, body: prBody, headBranch: pullHeadBranch, baseBranch: repository.defaultBranch }),
       });
       const result = await response.json() as RepositorySnapshot | { error: string };
       if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Pull request could not be created");
@@ -389,7 +550,7 @@ export default function Home() {
       const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          title: issueTitle, body: issueBody, author: "Achal Sood",
+          title: issueTitle, body: issueBody,
           labels: issueLabels.split(",").map((label) => label.trim()).filter(Boolean),
         }),
       });
@@ -437,7 +598,7 @@ export default function Home() {
     try {
       const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/issues/${selectedIssue.number}/comments`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ body: issueComment, author: "Achal Sood" }),
+        body: JSON.stringify({ body: issueComment }),
       });
       const result = await response.json() as RepositoryIssue[] | { error: string };
       if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Comment could not be added");
@@ -474,7 +635,7 @@ export default function Home() {
     try {
       const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/actions`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: repository.branch, author: "Achal Sood" }),
+        body: JSON.stringify({ branch: repository.branch }),
       });
       const result = await response.json() as WorkflowRun[] | { error: string };
       if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error : "Workflow could not be started");
@@ -546,7 +707,7 @@ export default function Home() {
   function sendMessage(event: FormEvent) {
     event.preventDefault();
     const body = draft.trim();
-    if (!body) return;
+    if (!body || !can("chat")) return;
     sync.sendChat(body);
     setDraft("");
   }
@@ -558,15 +719,38 @@ export default function Home() {
 
   return (
     <main className="app-shell">
+      {authState !== "ready" && <section className="auth-gate" aria-live="polite">
+        <span className="brand-mark large"><span /></span>
+        <h1>{authState === "required" ? "Sign in to MeshForge" : authState === "error" ? "Workspace unavailable" : "Opening your workspace…"}</h1>
+        <p>{authState === "required" ? "Use your ChatGPT identity to access repositories, collaboration rooms, and attributed source history." : authState === "error" ? authError : "Resolving your repositories and permissions."}</p>
+        {authState === "required" && <a href="/signin-with-chatgpt?return_to=/">Sign in with ChatGPT</a>}
+        {authState === "error" && <button onClick={() => window.location.reload()}>Try again</button>}
+      </section>}
+      {authState === "ready" && session && !repository && <section className="auth-gate empty-workspace">
+        <span className="brand-mark large"><span /></span>
+        <h1>{session.invitations.length ? "You’ve been invited" : "Create your first repository"}</h1>
+        <p>{session.invitations.length ? "Accept a repository invitation or start a new workspace of your own." : "Your workspace is ready. Start a repository to unlock source control, issues, actions, and live collaboration."}</p>
+        {!!session.invitations.length && <div className="empty-invitations">{session.invitations.map((invitation) => <article key={invitation.id}><div><strong>{invitation.owner}/{invitation.repositoryName}</strong><span>{invitation.role} · invited by {invitation.invitedBy}</span></div><button onClick={() => void respondToInvitation(invitation.id, true)} disabled={teamMutation}>Accept</button><button onClick={() => void respondToInvitation(invitation.id, false)} disabled={teamMutation}>Decline</button></article>)}</div>}
+        <form onSubmit={createRepository}><input value={newRepositoryName} onChange={(event) => setNewRepositoryName(event.target.value)} placeholder="my-project" aria-label="Repository name" autoFocus/><button disabled={!newRepositoryName.trim() || creatingRepository}>{creatingRepository ? "Creating…" : "Create repository"}</button></form>
+        {repositoryError && <span className="empty-error">{repositoryError}</span>}
+      </section>}
       <header className="topbar">
         <a className="brand" href="#" aria-label="MeshForge home"><span className="brand-mark"><span /></span><strong>MeshForge</strong></a>
-        <button className="repo-select"><span className="repo-cube">◇</span><strong>{repository?.name ?? "synapse-ai"}</strong><Icon name="chevron" size={14} /></button>
+        <div className="repo-picker">
+          <button className="repo-select" onClick={() => setRepoMenuOpen((open) => !open)} aria-expanded={repoMenuOpen}><span className="repo-cube">◇</span><strong>{repository?.name ?? "Choose repository"}</strong><Icon name="chevron" size={14} /></button>
+          {repoMenuOpen && <div className="repo-menu">
+            <header><div><strong>Your repositories</strong><span>{session?.repositories.length ?? 0} available</span></div><span className="user-role">{currentAccess?.role ?? "signed in"}</span></header>
+            <div className="repo-menu-list">{session?.repositories.map((item) => <button key={`${item.owner}/${item.name}`} className={item.owner === repository?.owner && item.name === repository?.name ? "active" : ""} onClick={() => void selectRepository(item.owner, item.name)}><span className="repo-cube">◇</span><div><strong>{item.owner}/{item.name}</strong><small>{item.role} · {item.defaultBranch}</small></div>{item.owner === repository?.owner && item.name === repository?.name && <Icon name="check" size={14}/>}</button>)}</div>
+            <form onSubmit={createRepository}><input value={newRepositoryName} onChange={(event) => setNewRepositoryName(event.target.value)} placeholder="new-repository" aria-label="New repository name"/><button disabled={!newRepositoryName.trim() || creatingRepository}><Icon name="plus" size={14}/>{creatingRepository ? "Creating…" : "Create"}</button></form>
+            {!!session?.invitations.length && <section className="pending-invites"><strong>Pending invitations</strong>{session.invitations.map((invitation) => <article key={invitation.id}><div><span>{invitation.owner}/{invitation.repositoryName}</span><small>{invitation.role} · from {invitation.invitedBy}</small></div><button onClick={() => void respondToInvitation(invitation.id, true)} disabled={teamMutation}>Accept</button><button onClick={() => void respondToInvitation(invitation.id, false)} disabled={teamMutation}>Decline</button></article>)}</section>}
+          </div>}
+        </div>
         <div className="branch-control">
           <button className="branch-pill" onClick={() => setBranchMenuOpen((open) => !open)} aria-expanded={branchMenuOpen}><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span><Icon name="chevron" size={12}/></button>
           {branchMenuOpen && <div className="branch-menu">
             <header><strong>Switch branches</strong><span>{repository?.branches.length ?? 0} total</span></header>
             <div className="branch-list">{repository?.branches.map((branch) => <button key={branch.name} className={branch.name === repository.branch ? "active" : ""} onClick={() => void switchBranch(branch.name)}><Icon name="branch" size={14}/><span>{branch.name}</span><code>{branch.shortOid}</code>{branch.isDefault && <em>default</em>}</button>)}</div>
-            <form onSubmit={createBranch}><input value={newBranchName} onChange={(event) => setNewBranchName(event.target.value)} placeholder="feat/branch-name" aria-label="New branch name"/><button disabled={!newBranchName.trim() || creatingBranch}><Icon name="plus" size={14}/>{creatingBranch ? "Creating…" : "New branch"}</button></form>
+            {can("branch") ? <form onSubmit={createBranch}><input value={newBranchName} onChange={(event) => setNewBranchName(event.target.value)} placeholder="feat/branch-name" aria-label="New branch name"/><button disabled={!newBranchName.trim() || creatingBranch}><Icon name="plus" size={14}/>{creatingBranch ? "Creating…" : "New branch"}</button></form> : <p className="permission-note">Contributor access is required to create branches.</p>}
           </div>}
         </div>
         <nav className="nav-tabs" aria-label="Repository navigation">
@@ -575,13 +759,14 @@ export default function Home() {
         <div className="top-presence" aria-label={`${actualPeers} realtime peers online`}>
           {(sync.presence.length ? sync.presence : [{ clientId: "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => <span className={`avatar sm ${person.color}`} key={person.clientId}>{person.name.slice(0, 2).toUpperCase()}<i /></span>)}
         </div>
-        <button className="share-button" onClick={() => flash("Invite link copied to clipboard")}><Icon name="share" /><span>Share workspace</span></button>
+        <span className="account-chip" title={session?.user.email}><b>{session?.user.initials ?? "MF"}</b><span>{session?.user.displayName ?? "Account"}</span></span>
+        <button className="share-button" onClick={() => void openTeam()} disabled={!repository}><Icon name="share" /><span>{can("invite") ? "Invite team" : "View team"}</span></button>
       </header>
 
       <section className="workspace">
         <aside className="explorer panel">
           <div className="panel-heading"><span>Explorer</span><button aria-label="Collapse explorer">↤</button></div>
-          <div className="repo-row"><strong>{repository?.owner ?? "achalsood"}/{repository?.name ?? "synapse-ai"}</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
+          <div className="repo-row"><strong>{repository ? `${repository.owner}/${repository.name}` : "No repository selected"}</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
           <div className="file-tree">
             {tree.map((item, index) => (
               <button key={`${item.path}-${index}`} style={{ paddingLeft: 13 + item.depth * 20 }} className={`tree-row ${activeFile === item.path ? "active" : ""}`} onClick={() => !item.type.startsWith("folder") && openFile(item.path)}>
@@ -599,8 +784,8 @@ export default function Home() {
           <div className="breadcrumbs">{activeFile.split("/").map((part, index, parts) => <span key={`${part}-${index}`} className={index === parts.length - 1 ? "crumb-current" : ""}>{part}{index < parts.length - 1 && <b>/</b>}</span>)}<span className={`sync-note ${sync.status}`}><Icon name={sync.status === "live" ? "check" : "radio"} size={13}/> {sync.status === "live" ? "Live · WebSocket" : sync.status}</span></div>
           <form className="repo-toolbar" onSubmit={createCommit}>
             <div><Icon name="git" size={15}/><span>{dirtyPaths.size ? `${dirtyPaths.size} modified ${dirtyPaths.size === 1 ? "file" : "files"}` : "Working tree clean"}</span></div>
-            <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Commit message" aria-label="Commit message" maxLength={160}/>
-            <button disabled={!dirtyPaths.size || committing}>{committing ? "Committing…" : "Commit changes"}</button>
+            <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder={can("commit") ? "Commit message" : "Read-only repository"} aria-label="Commit message" maxLength={160} disabled={!can("commit")}/>
+            <button disabled={!dirtyPaths.size || committing || !can("commit")}>{committing ? "Committing…" : "Commit changes"}</button>
           </form>
           {repositoryError && <div className="repository-error" role="alert">{repositoryError}</div>}
           <div className="code-wrap">
@@ -612,6 +797,7 @@ export default function Home() {
                 value={sync.text}
                 onChange={(event) => sync.edit(event.target.value)}
                 onSelect={(event) => sync.updateSelection(event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}
+                readOnly={!can("commit")}
                 spellCheck={false}
               />
               <div className="remote-cursor-list" aria-label="Live peer cursors">{sync.presence.filter((peer) => peer.cursorFrom !== peer.cursorTo || peer.clientId).slice(0, 3).map((peer) => <span className={peer.color} key={peer.clientId}>{peer.name}<i>{peer.cursorFrom}</i></span>)}</div>
@@ -647,10 +833,11 @@ export default function Home() {
             <div className="pull-content">
               <form className="pull-form" onSubmit={createPullRequest}>
                 <div><strong>Open a pull request</strong><span>Compare a feature branch against {repository?.defaultBranch ?? "main"}</span></div>
-                <label><span>Head branch</span><select value={pullHeadBranch} onChange={(event) => setPrHeadBranch(event.target.value)} disabled={!repository?.branches.some((branch) => !branch.isDefault)}><option value="">Create a feature branch first</option>{repository?.branches.filter((branch) => !branch.isDefault).map((branch) => <option value={branch.name} key={branch.name}>{branch.name} · {branch.shortOid}</option>)}</select></label>
-                <label><span>Title</span><input value={prTitle} onChange={(event) => setPrTitle(event.target.value)} placeholder="Describe the change" maxLength={160}/></label>
-                <label><span>Description</span><textarea value={prBody} onChange={(event) => setPrBody(event.target.value)} placeholder="What changed, and why?" maxLength={2000}/></label>
-                <button disabled={!pullHeadBranch || creatingPull}>{creatingPull ? "Opening…" : "Open pull request"}</button>
+                <label><span>Head branch</span><select value={pullHeadBranch} onChange={(event) => setPrHeadBranch(event.target.value)} disabled={!can("pull_request") || !repository?.branches.some((branch) => !branch.isDefault)}><option value="">Create a feature branch first</option>{repository?.branches.filter((branch) => !branch.isDefault).map((branch) => <option value={branch.name} key={branch.name}>{branch.name} · {branch.shortOid}</option>)}</select></label>
+                <label><span>Title</span><input value={prTitle} onChange={(event) => setPrTitle(event.target.value)} placeholder="Describe the change" maxLength={160} disabled={!can("pull_request")}/></label>
+                <label><span>Description</span><textarea value={prBody} onChange={(event) => setPrBody(event.target.value)} placeholder="What changed, and why?" maxLength={2000} disabled={!can("pull_request")}/></label>
+                <button disabled={!pullHeadBranch || creatingPull || !can("pull_request")}>{creatingPull ? "Opening…" : "Open pull request"}</button>
+                {!can("pull_request") && <p className="permission-note">Contributor access is required to open pull requests.</p>}
               </form>
               <section className="pull-list">
                 <div className="pull-list-title"><strong>Repository activity</strong><span>{repository?.pullRequests.length ?? 0} total</span></div>
@@ -659,7 +846,7 @@ export default function Home() {
                   <h3>{pull.title}</h3>{pull.body && <p>{pull.body}</p>}
                   <div className="pull-meta"><span>{pull.author} · {new Date(pull.createdAt).toLocaleString()}</span><strong>{pull.filesChanged} files</strong><em>+{pull.insertions} −{pull.deletions}</em></div>
                   {pull.diffs.length > 0 && <details><summary>View changed files</summary>{pull.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
-                  {pull.status === "open" && <footer><span>{pull.mergeable ? "Base is unchanged · ready to merge" : "Base moved · rebase required"}</span><button disabled={!pull.mergeable || mergingNumber !== null} onClick={() => void mergePullRequest(pull.number)}>{mergingNumber === pull.number ? "Merging…" : "Merge pull request"}</button></footer>}
+                  {pull.status === "open" && <footer><span>{can("merge") ? pull.mergeable ? "Base is unchanged · ready to merge" : "Base moved · rebase required" : "Maintainer access is required to merge"}</span><button disabled={!pull.mergeable || mergingNumber !== null || !can("merge")} onClick={() => void mergePullRequest(pull.number)}>{mergingNumber === pull.number ? "Merging…" : "Merge pull request"}</button></footer>}
                   {pull.status === "merged" && <footer className="merged-footer"><span>Merged {pull.mergedAt ? new Date(pull.mergedAt).toLocaleString() : ""}</span><code>{pull.mergeCommitOid?.slice(0, 8)}</code></footer>}
                 </article>) : <div className="empty-pulls"><Icon name="branch" size={30}/><strong>No pull requests yet</strong><span>Create a feature branch, commit a change, then open your first review.</span></div>}
               </section>
@@ -671,10 +858,11 @@ export default function Home() {
             <div className="issues-content">
               <form className="issue-create" onSubmit={createIssue}>
                 <div><strong>Open a new issue</strong><span>Issues are stored with the repository and shared with the team.</span></div>
-                <label><span>Title</span><input value={issueTitle} onChange={(event) => setIssueTitle(event.target.value)} placeholder="What needs attention?" maxLength={160}/></label>
-                <label><span>Description</span><textarea value={issueBody} onChange={(event) => setIssueBody(event.target.value)} placeholder="Add context, expected behavior, or acceptance criteria." maxLength={5000}/></label>
-                <label><span>Labels</span><input value={issueLabels} onChange={(event) => setIssueLabels(event.target.value)} placeholder="bug, performance" maxLength={180}/><small>Comma-separated · up to six labels</small></label>
-                <button disabled={!issueTitle.trim() || issueMutation}>{issueMutation ? "Saving…" : "Open issue"}</button>
+                <label><span>Title</span><input value={issueTitle} onChange={(event) => setIssueTitle(event.target.value)} placeholder="What needs attention?" maxLength={160} disabled={!can("issues")}/></label>
+                <label><span>Description</span><textarea value={issueBody} onChange={(event) => setIssueBody(event.target.value)} placeholder="Add context, expected behavior, or acceptance criteria." maxLength={5000} disabled={!can("issues")}/></label>
+                <label><span>Labels</span><input value={issueLabels} onChange={(event) => setIssueLabels(event.target.value)} placeholder="bug, performance" maxLength={180} disabled={!can("issues")}/><small>Comma-separated · up to six labels</small></label>
+                <button disabled={!issueTitle.trim() || issueMutation || !can("issues")}>{issueMutation ? "Saving…" : "Open issue"}</button>
+                {!can("issues") && <p className="permission-note">Contributor access is required to manage issues.</p>}
               </form>
               <section className="issues-browser">
                 <div className="issue-toolbar"><div>{(["open", "closed", "all"] as const).map((filter) => <button key={filter} className={issueFilter === filter ? "active" : ""} onClick={() => setIssueFilter(filter)}>{filter}<span>{filter === "all" ? issues.length : issues.filter((issue) => issue.status === filter).length}</span></button>)}</div><button onClick={() => void loadIssues()} disabled={issuesLoading}>{issuesLoading ? "Refreshing…" : "Refresh"}</button></div>
@@ -684,20 +872,20 @@ export default function Home() {
                     {!issuesLoading && !filteredIssues.length && <div className="empty-issues"><Icon name="check" size={28}/><strong>No {issueFilter === "all" ? "" : issueFilter} issues</strong><span>Use the form to capture the next piece of work.</span></div>}
                   </div>
                   {selectedIssue ? <article className="issue-detail">
-                    <header><div><span className={`issue-state ${selectedIssue.status}`}>{selectedIssue.status}</span><code>#{selectedIssue.number}</code></div><button onClick={() => void changeIssueStatus(selectedIssue)} disabled={issueMutation}>{selectedIssue.status === "open" ? "Close issue" : "Reopen issue"}</button></header>
+                    <header><div><span className={`issue-state ${selectedIssue.status}`}>{selectedIssue.status}</span><code>#{selectedIssue.number}</code></div><button onClick={() => void changeIssueStatus(selectedIssue)} disabled={issueMutation || !can("issues")}>{selectedIssue.status === "open" ? "Close issue" : "Reopen issue"}</button></header>
                     <h2>{selectedIssue.title}</h2>
-                    <div className="issue-author"><span className="avatar xs mint">AS</span><p><strong>{selectedIssue.author}</strong> opened this issue · {new Date(selectedIssue.createdAt).toLocaleString()}</p></div>
+                    <div className="issue-author"><span className="avatar xs mint">{selectedIssue.author.slice(0, 2).toUpperCase()}</span><p><strong>{selectedIssue.author}</strong> opened this issue · {new Date(selectedIssue.createdAt).toLocaleString()}</p></div>
                     <p className="issue-description">{selectedIssue.body || "No description was provided."}</p>
                     <div className="issue-labels">{selectedIssue.labels.map((label) => <span key={label}>{label}</span>)}</div>
                     <section className="issue-comments"><h3>Discussion <span>{selectedIssue.comments.length}</span></h3>{selectedIssue.comments.map((comment) => <article key={comment.id}><span className="avatar xs violet">{comment.author.slice(0, 2).toUpperCase()}</span><div><header><strong>{comment.author}</strong><time>{new Date(comment.createdAt).toLocaleString()}</time></header><p>{comment.body}</p></div></article>)}</section>
-                    <form className="comment-form" onSubmit={addIssueComment}><textarea value={issueComment} onChange={(event) => setIssueComment(event.target.value)} placeholder="Add to the discussion…" maxLength={3000}/><button disabled={!issueComment.trim() || issueMutation}>{issueMutation ? "Posting…" : "Comment"}</button></form>
+                    <form className="comment-form" onSubmit={addIssueComment}><textarea value={issueComment} onChange={(event) => setIssueComment(event.target.value)} placeholder={can("issues") ? "Add to the discussion…" : "Read-only discussion"} maxLength={3000} disabled={!can("issues")}/><button disabled={!issueComment.trim() || issueMutation || !can("issues")}>{issueMutation ? "Posting…" : "Comment"}</button></form>
                   </article> : <div className="empty-issues detail"><Icon name="activity" size={28}/><strong>Select an issue</strong><span>Open an issue to view its details and discussion.</span></div>}
                 </div>
               </section>
             </div>
           </aside>}
           {activeNav === "Actions" && <aside className="product-drawer actions-drawer" aria-label="Repository actions">
-            <header><div><Icon name="radio"/><div><strong>Actions</strong><span>Self-hosted repository checks · no external CI service</span></div></div><div><button className="run-workflow" onClick={() => void runWorkflow()} disabled={runningWorkflow || !repository}>{runningWorkflow ? "Running…" : "Run workflow"}</button><button onClick={() => setActiveNav("Code")} aria-label="Close actions">×</button></div></header>
+            <header><div><Icon name="radio"/><div><strong>Actions</strong><span>Self-hosted repository checks · no external CI service</span></div></div><div><button className="run-workflow" onClick={() => void runWorkflow()} disabled={runningWorkflow || !repository || !can("actions")}>{runningWorkflow ? "Running…" : "Run workflow"}</button><button onClick={() => setActiveNav("Code")} aria-label="Close actions">×</button></div></header>
             {actionsError && <div className="drawer-error" role="alert">{actionsError}</div>}
             <div className="actions-content">
               <aside className="workflow-sidebar"><strong>Workflows</strong><button className="active"><Icon name="activity" size={15}/><div><span>Mesh CI</span><small>Repository quality gate</small></div></button><footer><span>Triggers</span><code>push · manual</code></footer></aside>
@@ -709,15 +897,40 @@ export default function Home() {
                     <div className="run-steps">{run.steps.map((step, index) => <article key={`${step.name}-${index}`}><span className={step.status}>{step.status === "success" ? "✓" : "×"}</span><div><header><strong>{step.name}</strong><time>{step.durationMs}ms</time></header><pre>{step.logs.join("\n")}</pre></div></article>)}</div>
                   </details>
                 </article>)}
-                {!actionsLoading && !workflowRuns.length && <div className="empty-actions"><Icon name="activity" size={30}/><strong>No workflow runs yet</strong><span>Run Mesh CI against the current branch to create the first result.</span><button onClick={() => void runWorkflow()}>Run workflow</button></div>}
+                {!actionsLoading && !workflowRuns.length && <div className="empty-actions"><Icon name="activity" size={30}/><strong>No workflow runs yet</strong><span>{can("actions") ? "Run Mesh CI against the current branch to create the first result." : "Maintainer access is required to start workflow runs."}</span><button onClick={() => void runWorkflow()} disabled={!can("actions")}>Run workflow</button></div>}
               </section>
+            </div>
+          </aside>}
+          {teamOpen && <aside className="product-drawer team-drawer" aria-label="Repository access">
+            <header><div><Icon name="users"/><div><strong>Repository access</strong><span>{repository?.owner}/{repository?.name} · your role is {currentAccess?.role}</span></div></div><button onClick={() => setTeamOpen(false)} aria-label="Close repository access">×</button></header>
+            {teamError && <div className="drawer-error" role="alert">{teamError}</div>}
+            <div className="team-content">
+              <section className="team-members">
+                <header><div><strong>Members</strong><span>{team?.members.length ?? 0} people with access</span></div></header>
+                {teamLoading && <p className="team-loading">Loading repository members…</p>}
+                {!teamLoading && team?.members.map((member) => <article key={member.userId}>
+                  <span className="avatar violet">{member.displayName.slice(0, 2).toUpperCase()}</span>
+                  <div><strong>{member.displayName}</strong><span>@{member.username} · {member.email}</span></div>
+                  {can("manage_members") && member.role !== "owner" ? <select value={member.role} onChange={(event) => void changeMember(member, event.target.value as RepositoryRole)} disabled={teamMutation}><option value="maintainer">Maintainer</option><option value="contributor">Contributor</option><option value="viewer">Viewer</option></select> : <span className={`role-badge ${member.role}`}>{member.role}</span>}
+                  {can("manage_members") && member.role !== "owner" && <button className="remove-member" onClick={() => void changeMember(member, null)} disabled={teamMutation}>Remove</button>}
+                </article>)}
+              </section>
+              <aside className="team-invitations">
+                <div><strong>Invite a teammate</strong><span>Permissions are enforced for source control and live rooms.</span></div>
+                {can("invite") ? <form onSubmit={inviteMember}>
+                  <label><span>Email</span><input type="email" value={inviteEmail} onChange={(event) => setInviteEmail(event.target.value)} placeholder="teammate@example.com" required/></label>
+                  <label><span>Role</span><select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as Exclude<RepositoryRole, "owner">)}>{currentAccess?.role === "owner" && <option value="maintainer">Maintainer</option>}<option value="contributor">Contributor</option><option value="viewer">Viewer</option></select></label>
+                  <button disabled={!inviteEmail.trim() || teamMutation}>{teamMutation ? "Updating…" : "Send invitation"}</button>
+                </form> : <p className="permission-note">Only owners and maintainers can invite repository members.</p>}
+                <section className="invitation-list"><strong>Invitations</strong>{team?.invitations.length ? team.invitations.map((invitation) => <article key={invitation.id}><div><span>{invitation.email}</span><small>{invitation.role} · {invitation.status}</small></div><time>{new Date(invitation.createdAt).toLocaleDateString()}</time></article>) : <p>No invitations yet.</p>}</section>
+              </aside>
             </div>
           </aside>}
         </section>
 
         <aside className="collab panel">
           <div className="room-heading"><div><strong>Live room</strong><span>{actualPeers}</span></div><span className={`audio-state ${audio.status}`}>{audio.status === "connected" ? `${audio.connectedPeers + 1} on audio` : audio.status === "idle" ? "Audio off" : audio.status}</span><button aria-label="Room options"><Icon name="more"/></button></div>
-          <section className="voice-section"><div className="voice-title"><p className="section-label">Voice · WebRTC</p>{audio.status === "idle" || audio.status === "error" ? <button className="join-audio" onClick={audio.join}><Icon name="headphones" size={15}/>{audio.status === "error" ? "Retry audio" : "Join audio"}</button> : null}</div>
+          <section className="voice-section"><div className="voice-title"><p className="section-label">Voice · WebRTC</p>{audio.status === "idle" || audio.status === "error" ? <button className="join-audio" onClick={audio.join} disabled={!can("audio")}><Icon name="headphones" size={15}/>{can("audio") ? audio.status === "error" ? "Retry audio" : "Join audio" : "Audio restricted"}</button> : null}</div>
             <div className="people-list">{(sync.presence.length ? sync.presence : [{ clientId: sync.selfId || "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => {
               const isSelf = person.clientId === sync.selfId || person.clientId === "local";
               const peerState = audio.peerStates[person.clientId];
@@ -726,12 +939,12 @@ export default function Home() {
                 : peerState === "connected" ? "Audio connected" : peerState === "connecting" ? "Connecting audio" : "Available";
               return <div className="person" key={person.clientId}><span className={`avatar ${person.color}`}>{person.name.slice(0,2).toUpperCase()}</span><div><strong>{person.name}</strong><small className={personStatus === "Speaking" ? "speaking" : ""}>{personStatus}</small></div>{isSelf && audio.speaking ? <div className="waveform" style={{opacity: Math.min(1, .45 + audio.level * 8)}}>{Array.from({length: 17}).map((_, i) => <i key={i} style={{height: `${5 + ((i * 7) % 17)}px`}} />)}</div> : <span className={`presence-dot ${peerState === "connected" || (isSelf && audio.status === "connected") ? "audio-live" : ""}`}/>}</div>;
             })}</div>
-            <div className="call-controls"><button disabled={audio.status !== "connected"} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button><button disabled={audio.status !== "connected"} aria-label="Audio device options"><Icon name="chevron" size={14}/></button><button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button><button aria-label="Room settings" onClick={() => flash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button><button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={audio.leave}><Icon name="phone"/></button></div>
+            <div className="call-controls"><button disabled={audio.status !== "connected" || !can("audio")} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button><button disabled={audio.status !== "connected" || !can("audio")} aria-label="Audio device options"><Icon name="chevron" size={14}/></button><button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={!can("audio") || audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button><button aria-label="Room settings" onClick={() => flash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button><button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={audio.leave}><Icon name="phone"/></button></div>
             {audio.status === "requesting" && <p className="audio-help">Choose Allow in the microphone permission prompt.</p>}
             {audio.error && <p className="audio-error" role="alert">{audio.error}</p>}
           </section>
           <section className="chat-section"><p className="section-label">Chat</p><div className="messages">{messages.map((message, index) => <article className="message" key={`${message.time}-${index}`}><span className={`avatar xs ${message.color}`}>{message.initials}</span><div><header><strong>{message.who}</strong><time>{message.time}</time></header><p>{message.body}</p></div></article>)}</div>
-            <form className="composer" onSubmit={sendMessage}><input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="Message the room…" aria-label="Message the room"/><button aria-label="Send message"><Icon name="send" size={17}/></button></form><small className="composer-help">Enter to send · synced to everyone</small>
+            <form className="composer" onSubmit={sendMessage}><input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={can("chat") ? "Message the room…" : "Chat requires contributor access"} aria-label="Message the room" disabled={!can("chat")}/><button aria-label="Send message" disabled={!can("chat") || !draft.trim()}><Icon name="send" size={17}/></button></form><small className="composer-help">{can("chat") ? "Enter to send · synced to everyone" : "Viewer access is read-only"}</small>
           </section>
         </aside>
       </section>

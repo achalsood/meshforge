@@ -12,6 +12,16 @@ interface SyncedChat extends ChatPayload {
   clientId: string;
 }
 
+interface RoomSyncAccess {
+  owner: string;
+  repository: string;
+  scope: string;
+  displayName: string;
+  initials: string;
+  canWrite: boolean;
+  enabled: boolean;
+}
+
 const COLORS = ["mint", "coral", "violet", "lilac"];
 
 function createClientId(): string {
@@ -21,7 +31,9 @@ function createClientId(): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-export function useRoomSync(roomId: string, initialText: string) {
+export function useRoomSync(roomId: string, initialText: string, access: RoomSyncAccess) {
+  const { owner, repository, scope, displayName, initials, canWrite, enabled } = access;
+  const repositoryQuery = `owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repository)}&scope=${encodeURIComponent(scope)}`;
   const [text, setText] = useState(initialText);
   const [status, setStatus] = useState<SyncStatus>("connecting");
   const [presence, setPresence] = useState<PresenceRecord[]>([]);
@@ -61,37 +73,38 @@ export function useRoomSync(roomId: string, initialText: string) {
 
   const postFallback = useCallback(async (events: RoomEvent[]) => {
     const started = performance.now();
-    const response = await fetch(`/api/rooms/${roomId}/events`, {
+    const response = await fetch(`/api/rooms/${roomId}/events?${repositoryQuery}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ events }),
     });
     if (!response.ok) throw new Error("Event persistence failed");
     setLatency(Math.max(1, Math.round(performance.now() - started)));
-  }, [roomId]);
+  }, [repositoryQuery, roomId]);
 
   const sendEvents = useCallback((events: RoomEvent[]) => {
+    if (!enabled) return;
     const batch: RealtimeBatch = { type: "batch", roomId, clientId: clientId.current, events };
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(batch));
     else void postFallback(events).catch(() => setStatus("offline"));
-  }, [postFallback, roomId]);
+  }, [enabled, postFallback, roomId]);
 
   const heartbeat = useCallback(() => {
-    if (!clientId.current) return;
+    if (!clientId.current || !enabled) return;
     const event: RoomEvent = {
       eventId: `${clientId.current}:presence:${Date.now()}`,
       clientId: clientId.current,
       kind: "presence",
       createdAt: Date.now(),
       payload: {
-        name: `You · ${clientId.current.slice(0, 4)}`,
+        name: displayName,
         color: COLORS[sequence.current % COLORS.length],
         cursorFrom: selection.current.from,
         cursorTo: selection.current.to,
       },
     };
     sendEvents([event]);
-  }, [sendEvents]);
+  }, [displayName, enabled, sendEvents]);
 
   useEffect(() => {
     replica.current = ReplicatedText.fromText(initialText);
@@ -112,7 +125,7 @@ export function useRoomSync(roomId: string, initialText: string) {
 
     const replay = async () => {
       const started = performance.now();
-      const response = await fetch(`/api/rooms/${roomId}/events?since=${latestSeq.current}`, { cache: "no-store" });
+      const response = await fetch(`/api/rooms/${roomId}/events?since=${latestSeq.current}&${repositoryQuery}`, { cache: "no-store" });
       if (!response.ok) throw new Error("Replay failed");
       const data = await response.json() as ReplayResponse;
       if (cancelled) return;
@@ -123,10 +136,10 @@ export function useRoomSync(roomId: string, initialText: string) {
     };
 
     const connect = () => {
-      if (cancelled) return;
+      if (cancelled || !enabled) return;
       setStatus(reconnectAttempt.current ? "recovering" : "connecting");
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const ws = new WebSocket(`${scheme}//${window.location.host}/api/realtime/${roomId}`);
+      const ws = new WebSocket(`${scheme}//${window.location.host}/api/realtime/${roomId}?${repositoryQuery}`);
       socket.current = ws;
       ws.addEventListener("open", () => {
         reconnectAttempt.current = 0;
@@ -150,6 +163,12 @@ export function useRoomSync(roomId: string, initialText: string) {
       ws.addEventListener("error", () => ws.close());
     };
 
+    if (!enabled) {
+      queueMicrotask(() => {
+        if (!cancelled) setStatus("offline");
+      });
+      return () => { cancelled = true; };
+    }
     void replay().catch(() => setStatus("recovering"));
     connect();
     const replayTimer = setInterval(() => void replay().catch(() => setStatus("recovering")), 1_500);
@@ -161,9 +180,10 @@ export function useRoomSync(roomId: string, initialText: string) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket.current?.close();
     };
-  }, [heartbeat, initialText, processEvents, roomId]);
+  }, [enabled, heartbeat, initialText, processEvents, repositoryQuery, roomId]);
 
   const edit = useCallback((nextText: string) => {
+    if (!canWrite) return;
     const before = replica.current.toString();
     const operations = replica.current.edit(before, nextText, clientId.current, () => ++sequence.current);
     setText(replica.current.toString());
@@ -178,14 +198,15 @@ export function useRoomSync(roomId: string, initialText: string) {
     };
     seenEvents.current.add(event.eventId);
     sendEvents([event]);
-  }, [sendEvents]);
+  }, [canWrite, sendEvents]);
 
   const updateSelection = useCallback((from: number, to: number) => {
     selection.current = { from, to };
   }, []);
 
   const sendChat = useCallback((body: string) => {
-    const payload: ChatPayload = { body: body.slice(0, 1000), name: "You", initials: "AS", color: "mint" };
+    if (!canWrite) return;
+    const payload: ChatPayload = { body: body.slice(0, 1000), name: displayName, initials, color: "mint" };
     const event: RoomEvent = {
       eventId: `${clientId.current}:chat:${++sequence.current}`,
       clientId: clientId.current,
@@ -196,7 +217,7 @@ export function useRoomSync(roomId: string, initialText: string) {
     seenEvents.current.add(event.eventId);
     setChats((current) => [...current, { ...payload, eventId: event.eventId, createdAt: event.createdAt, clientId: event.clientId }].slice(-100));
     sendEvents([event]);
-  }, [sendEvents]);
+  }, [canWrite, displayName, initials, sendEvents]);
 
   return { text, status, presence, chats, latency, appliedOperations, selfId, edit, updateSelection, sendChat };
 }

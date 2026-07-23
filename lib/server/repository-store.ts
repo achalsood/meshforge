@@ -77,6 +77,35 @@ export async function ensureRepositorySchema(db: D1Database): Promise<void> {
         created_at INTEGER NOT NULL,
         UNIQUE(owner, name)
       )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        username TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repository_members (
+        repository_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        added_at INTEGER NOT NULL,
+        invited_by INTEGER,
+        PRIMARY KEY(repository_id, user_id)
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repository_members_user_idx ON repository_members (user_id, repository_id)"),
+      db.prepare(`CREATE TABLE IF NOT EXISTS repository_invitations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repository_id INTEGER NOT NULL,
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,
+        invited_by INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at INTEGER NOT NULL,
+        responded_at INTEGER,
+        UNIQUE(repository_id, email)
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS repository_invitations_email_status_idx ON repository_invitations (email, status)"),
       db.prepare(`CREATE TABLE IF NOT EXISTS repo_objects (
         oid TEXT PRIMARY KEY,
         object_type TEXT NOT NULL,
@@ -285,7 +314,7 @@ async function ensureSeedRepository(db: D1Database, owner: string, name: string)
   if (!repository) throw new Error("Repository could not be initialized");
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = 'main'")
     .bind(repository.id).first<HeadRow>();
-  if (!head) await createSnapshotCommit(db, repository, "main", "Achal Sood", "Initial repository snapshot", INITIAL_FILES);
+  if (!head) await createSnapshotCommit(db, repository, "MeshForge", "Initial repository snapshot", INITIAL_FILES);
   return repository;
 }
 
@@ -444,11 +473,11 @@ export async function createRepositoryPullRequest(db: D1Database, owner: string,
     (repository_id, number, title, body, head_branch, base_branch, head_oid, base_oid, status, author, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`)
     .bind(repository.id, Number(numberRow?.next_number ?? 1), (input.title?.trim() || `Merge ${headBranch} into ${baseBranch}`).slice(0, 160),
-      (input.body ?? "").slice(0, 2000), headBranch, baseBranch, head.commit_oid, base.commit_oid, (input.author || "Achal Sood").slice(0, 80), now, now).run();
+      (input.body ?? "").slice(0, 2000), headBranch, baseBranch, head.commit_oid, base.commit_oid, (input.author || "MeshForge user").slice(0, 80), now, now).run();
   return getRepositorySnapshot(db, owner, name, headBranch);
 }
 
-export async function mergeRepositoryPullRequest(db: D1Database, owner: string, name: string, number: number, author = "Achal Sood"): Promise<RepositorySnapshot> {
+export async function mergeRepositoryPullRequest(db: D1Database, owner: string, name: string, number: number, author = "MeshForge user"): Promise<RepositorySnapshot> {
   const repository = await ensureSeedRepository(db, owner, name);
   const pull = await db.prepare(`SELECT number, title, head_branch, base_branch, head_oid, base_oid, status
     FROM repo_pull_requests WHERE repository_id = ? AND number = ?`).bind(repository.id, number).first<{
@@ -483,7 +512,7 @@ export async function commitRepository(db: D1Database, owner: string, name: stri
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
   if (input.expectedHeadOid && head?.commit_oid !== input.expectedHeadOid) throw new Error("Branch moved; reload before committing");
-  const author = input.author || "Achal Sood";
+  const author = input.author || "MeshForge user";
   const commitOid = await createSnapshotCommit(db, repository, branch, author, input.message?.trim() || "Update collaborative workspace", files);
   await createWorkflowRun(db, repository, branch, commitOid, author, "push", files);
   return getRepositorySnapshot(db, owner, name, branch);
@@ -544,7 +573,7 @@ export async function createRepositoryIssue(db: D1Database, owner: string, name:
     (repository_id, number, title, body, status, author, assignee, labels, created_at, updated_at)
     VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`)
     .bind(repository.id, Number(numberRow?.next_number ?? 1), title.slice(0, 160), (input.body ?? "").trim().slice(0, 5000),
-      (input.author || "Achal Sood").slice(0, 80), input.assignee?.trim().slice(0, 80) || null,
+      (input.author || "MeshForge user").slice(0, 80), input.assignee?.trim().slice(0, 80) || null,
       JSON.stringify(normalizeLabels(input.labels)), now, now).run();
   return listRepositoryIssues(db, owner, name);
 }
@@ -578,7 +607,7 @@ export async function addRepositoryIssueComment(db: D1Database, owner: string, n
   const now = Date.now();
   await db.batch([
     db.prepare(`INSERT INTO repo_issue_comments (repository_id, issue_number, author, body, created_at)
-      VALUES (?, ?, ?, ?, ?)`).bind(repository.id, number, (input.author || "Achal Sood").slice(0, 80), body.slice(0, 3000), now),
+      VALUES (?, ?, ?, ?, ?)`).bind(repository.id, number, (input.author || "MeshForge user").slice(0, 80), body.slice(0, 3000), now),
     db.prepare("UPDATE repo_issues SET updated_at = ? WHERE repository_id = ? AND number = ?").bind(now, repository.id, number),
   ]);
   return listRepositoryIssues(db, owner, name);
@@ -640,6 +669,6 @@ export async function runRepositoryWorkflow(db: D1Database, owner: string, name:
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
   if (!head) throw new Error("Branch not found");
-  await createWorkflowRun(db, repository, branch, head.commit_oid, input.author || "Achal Sood", "manual");
+  await createWorkflowRun(db, repository, branch, head.commit_oid, input.author || "MeshForge user", "manual");
   return listRepositoryWorkflowRuns(db, owner, name);
 }

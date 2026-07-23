@@ -43,6 +43,43 @@ export const repositories = sqliteTable("repositories", {
   createdAt: integer("created_at").notNull(),
 }, (table) => [uniqueIndex("repositories_owner_name_unique").on(table.owner, table.name)]);
 
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull(),
+  displayName: text("display_name").notNull(),
+  username: text("username").notNull(),
+  createdAt: integer("created_at").notNull(),
+  lastSeenAt: integer("last_seen_at").notNull(),
+}, (table) => [
+  uniqueIndex("users_email_unique").on(table.email),
+  uniqueIndex("users_username_unique").on(table.username),
+]);
+
+export const repositoryMembers = sqliteTable("repository_members", {
+  repositoryId: integer("repository_id").notNull(),
+  userId: integer("user_id").notNull(),
+  role: text("role", { enum: ["owner", "maintainer", "contributor", "viewer"] }).notNull(),
+  addedAt: integer("added_at").notNull(),
+  invitedBy: integer("invited_by"),
+}, (table) => [
+  primaryKey({ columns: [table.repositoryId, table.userId] }),
+  index("repository_members_user_idx").on(table.userId, table.repositoryId),
+]);
+
+export const repositoryInvitations = sqliteTable("repository_invitations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  repositoryId: integer("repository_id").notNull(),
+  email: text("email").notNull(),
+  role: text("role", { enum: ["maintainer", "contributor", "viewer"] }).notNull(),
+  invitedBy: integer("invited_by").notNull(),
+  status: text("status", { enum: ["pending", "accepted", "declined", "revoked"] }).notNull().default("pending"),
+  createdAt: integer("created_at").notNull(),
+  respondedAt: integer("responded_at"),
+}, (table) => [
+  index("repository_invitations_email_status_idx").on(table.email, table.status),
+  uniqueIndex("repository_invitations_repo_email_unique").on(table.repositoryId, table.email),
+]);
+
 export const repoObjects = sqliteTable("repo_objects", {
   oid: text("oid").primaryKey(),
   objectType: text("object_type", { enum: ["blob", "tree", "commit"] }).notNull(),
