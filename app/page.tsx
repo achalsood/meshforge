@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
 import { roomSlug } from "@/lib/collaboration/room-id";
+import { chatGPTSignInUrl, chatGPTSignOutUrl, chatGPTSwitchUserUrl } from "@/lib/auth/navigation";
 import type { RepositoryPermission, RepositoryRole } from "@/lib/auth/permissions";
 import type { RepositoryMember, SessionPayload, TeamPayload } from "@/lib/auth/types";
 import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
@@ -105,6 +106,7 @@ export default function Home() {
   const [authState, setAuthState] = useState<"loading" | "ready" | "required" | "error">("loading");
   const [authError, setAuthError] = useState("");
   const [repoMenuOpen, setRepoMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [newRepositoryName, setNewRepositoryName] = useState("");
   const [creatingRepository, setCreatingRepository] = useState(false);
   const [teamOpen, setTeamOpen] = useState(false);
@@ -219,6 +221,15 @@ export default function Home() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!accountMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setAccountMenuOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [accountMenuOpen]);
 
   useEffect(() => {
     if (!repositoryOwner || !repositoryName || (activeNav !== "Issues" && activeNav !== "Actions")) return;
@@ -723,7 +734,7 @@ export default function Home() {
         <span className="brand-mark large"><span /></span>
         <h1>{authState === "required" ? "Sign in to MeshForge" : authState === "error" ? "Workspace unavailable" : "Opening your workspace…"}</h1>
         <p>{authState === "required" ? "Use your ChatGPT identity to access repositories, collaboration rooms, and attributed source history." : authState === "error" ? authError : "Resolving your repositories and permissions."}</p>
-        {authState === "required" && <a href="/signin-with-chatgpt?return_to=/">Sign in with ChatGPT</a>}
+        {authState === "required" && <a href={chatGPTSignInUrl()}>Sign in with ChatGPT</a>}
         {authState === "error" && <button onClick={() => window.location.reload()}>Try again</button>}
       </section>}
       {authState === "ready" && session && !repository && <section className="auth-gate empty-workspace">
@@ -737,7 +748,7 @@ export default function Home() {
       <header className="topbar">
         <a className="brand" href="#" aria-label="MeshForge home"><span className="brand-mark"><span /></span><strong>MeshForge</strong></a>
         <div className="repo-picker">
-          <button className="repo-select" onClick={() => setRepoMenuOpen((open) => !open)} aria-expanded={repoMenuOpen}><span className="repo-cube">◇</span><strong>{repository?.name ?? "Choose repository"}</strong><Icon name="chevron" size={14} /></button>
+          <button className="repo-select" onClick={() => { setRepoMenuOpen((open) => !open); setAccountMenuOpen(false); }} aria-expanded={repoMenuOpen}><span className="repo-cube">◇</span><strong>{repository?.name ?? "Choose repository"}</strong><Icon name="chevron" size={14} /></button>
           {repoMenuOpen && <div className="repo-menu">
             <header><div><strong>Your repositories</strong><span>{session?.repositories.length ?? 0} available</span></div><span className="user-role">{currentAccess?.role ?? "signed in"}</span></header>
             <div className="repo-menu-list">{session?.repositories.map((item) => <button key={`${item.owner}/${item.name}`} className={item.owner === repository?.owner && item.name === repository?.name ? "active" : ""} onClick={() => void selectRepository(item.owner, item.name)}><span className="repo-cube">◇</span><div><strong>{item.owner}/{item.name}</strong><small>{item.role} · {item.defaultBranch}</small></div>{item.owner === repository?.owner && item.name === repository?.name && <Icon name="check" size={14}/>}</button>)}</div>
@@ -746,7 +757,7 @@ export default function Home() {
           </div>}
         </div>
         <div className="branch-control">
-          <button className="branch-pill" onClick={() => setBranchMenuOpen((open) => !open)} aria-expanded={branchMenuOpen}><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span><Icon name="chevron" size={12}/></button>
+          <button className="branch-pill" onClick={() => { setBranchMenuOpen((open) => !open); setAccountMenuOpen(false); }} aria-expanded={branchMenuOpen}><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span><Icon name="chevron" size={12}/></button>
           {branchMenuOpen && <div className="branch-menu">
             <header><strong>Switch branches</strong><span>{repository?.branches.length ?? 0} total</span></header>
             <div className="branch-list">{repository?.branches.map((branch) => <button key={branch.name} className={branch.name === repository.branch ? "active" : ""} onClick={() => void switchBranch(branch.name)}><Icon name="branch" size={14}/><span>{branch.name}</span><code>{branch.shortOid}</code>{branch.isDefault && <em>default</em>}</button>)}</div>
@@ -759,7 +770,16 @@ export default function Home() {
         <div className="top-presence" aria-label={`${actualPeers} realtime peers online`}>
           {(sync.presence.length ? sync.presence : [{ clientId: "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => <span className={`avatar sm ${person.color}`} key={person.clientId}>{person.name.slice(0, 2).toUpperCase()}<i /></span>)}
         </div>
-        <span className="account-chip" title={session?.user.email}><b>{session?.user.initials ?? "MF"}</b><span>{session?.user.displayName ?? "Account"}</span></span>
+        <div className="account-control">
+          <button className="account-chip" title={session?.user.email} onClick={() => { setAccountMenuOpen((open) => !open); setRepoMenuOpen(false); setBranchMenuOpen(false); }} aria-expanded={accountMenuOpen} aria-haspopup="menu" aria-controls="account-menu" aria-label={`Account menu for ${session?.user.displayName ?? "signed-in user"}`}>
+            <b>{session?.user.initials ?? "MF"}</b><span>{session?.user.displayName ?? "Account"}</span><Icon name="chevron" size={12}/>
+          </button>
+          {accountMenuOpen && <div className="account-menu" id="account-menu" role="menu">
+            <header><b>{session?.user.initials ?? "MF"}</b><div><strong>{session?.user.displayName}</strong><span>{session?.user.email}</span></div></header>
+            <a href={chatGPTSwitchUserUrl()} role="menuitem"><Icon name="users" size={15}/><div><strong>Switch user</strong><span>Sign in with another ChatGPT account</span></div></a>
+            <a href={chatGPTSignOutUrl()} role="menuitem"><Icon name="phone" size={15}/><div><strong>Sign out</strong><span>End this MeshForge session</span></div></a>
+          </div>}
+        </div>
         <button className="share-button" onClick={() => void openTeam()} disabled={!repository}><Icon name="share" /><span>{can("invite") ? "Invite team" : "View team"}</span></button>
       </header>
 
