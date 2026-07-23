@@ -3,6 +3,7 @@ import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } fr
 import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
+import { commitRepository, getRepositorySnapshot } from "../lib/server/repository-store";
 import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
 
 interface Env {
@@ -98,6 +99,27 @@ async function handleAudioSignals(request: Request, env: Env, roomId: string): P
   return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
 }
 
+async function handleRepository(request: Request, env: Env, owner: string, name: string, commitRoute: boolean): Promise<Response> {
+  try {
+    if (request.method === "GET" && !commitRoute) {
+      const branch = new URL(request.url).searchParams.get("branch") || "main";
+      return Response.json(await getRepositorySnapshot(env.DB, owner, name, branch), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    if (request.method === "POST" && commitRoute) {
+      const raw = await request.text();
+      if (raw.length > 2_200_000) return Response.json({ error: "Commit payload is too large" }, { status: 413 });
+      const input = JSON.parse(raw) as Parameters<typeof commitRepository>[3];
+      return Response.json(await commitRepository(env.DB, owner, name, input), { status: 201 });
+    }
+    return new Response("Method not allowed", { status: 405, headers: { Allow: commitRoute ? "POST" : "GET" } });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Repository request failed";
+    return Response.json({ error: message }, { status: message === "Branch not found" ? 404 : message.startsWith("Branch moved") ? 409 : 400 });
+  }
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -118,6 +140,9 @@ const worker = {
 
     const signalMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/signals$/i);
     if (signalMatch) return handleAudioSignals(request, env, signalMatch[1]);
+
+    const repositoryMatch = url.pathname.match(/^\/api\/repos\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)(\/commits)?$/i);
+    if (repositoryMatch) return handleRepository(request, env, repositoryMatch[1], repositoryMatch[2], Boolean(repositoryMatch[3]));
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

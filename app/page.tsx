@@ -1,8 +1,9 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
+import type { RepositorySnapshot } from "@/lib/repository/types";
 
 type IconName =
   | "branch" | "chevron" | "code" | "search" | "more" | "share"
@@ -80,33 +81,49 @@ export class HNSWIndex {
   }
 }`;
 
-const tree = [
-  { type: "folder", name: ".meshforge", depth: 0 },
-  { type: "folder", name: ".vscode", depth: 0 },
-  { type: "folder-open", name: "src", depth: 0 },
-  { type: "folder", name: "core", depth: 1 },
-  { type: "folder-open", name: "retrieval", depth: 1 },
-  { type: "ts", name: "hnsw.ts", depth: 2, active: true, badge: "M" },
-  { type: "ts", name: "embeddings.ts", depth: 2, badge: "A" },
-  { type: "ts", name: "search.ts", depth: 2 },
-  { type: "folder", name: "types", depth: 1 },
-  { type: "folder", name: "utils", depth: 1 },
-  { type: "folder-open", name: "tests", depth: 0 },
-  { type: "ts", name: "retrieval.test.ts", depth: 1 },
-  { type: "ts", name: "search.test.ts", depth: 1 },
-  { type: "git", name: ".gitignore", depth: 0 },
-  { type: "ts", name: "tsconfig.json", depth: 0 },
-  { type: "book", name: "README.md", depth: 0 },
-];
+interface TreeItem { type: "folder-open" | "ts" | "git" | "book" | "file"; name: string; path: string; depth: number; }
+
+function buildTree(paths: string[]): TreeItem[] {
+  const items: TreeItem[] = [];
+  const folders = new Set<string>();
+  for (const path of [...paths].sort()) {
+    const segments = path.split("/");
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const folderPath = segments.slice(0, index + 1).join("/");
+      if (!folders.has(folderPath)) {
+        folders.add(folderPath);
+        items.push({ type: "folder-open", name: segments[index], path: folderPath, depth: index });
+      }
+    }
+    const name = segments.at(-1) ?? path;
+    const type = name === "README.md" ? "book" : name === ".gitignore" ? "git" : /\.(ts|tsx|json)$/.test(name) ? "ts" : "file";
+    items.push({ type, name, path, depth: segments.length - 1 });
+  }
+  return items;
+}
+
+function roomSlug(path: string): string {
+  let hash = 2166136261;
+  for (const character of path) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  return `synapse-${(hash >>> 0).toString(16)}`;
+}
 
 export default function Home() {
   const [draft, setDraft] = useState("");
   const [aiOpen, setAiOpen] = useState(false);
   const [activeNav, setActiveNav] = useState("Code");
-  const [activeFile, setActiveFile] = useState("hnsw.ts");
+  const [activeFile, setActiveFile] = useState("src/retrieval/hnsw.ts");
   const [toast, setToast] = useState("");
-  const sync = useRoomSync("synapse-ai", INITIAL_CODE);
+  const [repository, setRepository] = useState<RepositorySnapshot | null>(null);
+  const [workingFiles, setWorkingFiles] = useState<Record<string, string>>({});
+  const [commitMessage, setCommitMessage] = useState("");
+  const [committing, setCommitting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [repositoryError, setRepositoryError] = useState("");
+  const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
+  const sync = useRoomSync(roomSlug(activeFile), activeContent);
   const audio = useAudioRoom("synapse-ai", sync.selfId, sync.presence);
+  const tree = useMemo(() => buildTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
   const messages = [
     ...initialMessages,
     ...sync.chats.map((message) => ({
@@ -118,6 +135,59 @@ export default function Home() {
     })),
   ];
   const actualPeers = Math.max(1, sync.presence.length);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/repos/achalsood/synapse-ai", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Repository could not be loaded");
+        return response.json() as Promise<RepositorySnapshot>;
+      })
+      .then((snapshot) => {
+        if (cancelled) return;
+        setRepository(snapshot);
+        setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
+      })
+      .catch((cause) => !cancelled && setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be loaded"));
+    return () => { cancelled = true; };
+  }, []);
+
+  const workingSnapshot = repository?.files.map((file) => ({
+    path: file.path,
+    content: file.path === activeFile ? sync.text : workingFiles[file.path] ?? file.content,
+  })) ?? [];
+  const dirtyPaths = new Set(workingSnapshot.filter((file) => file.content !== repository?.files.find((stored) => stored.path === file.path)?.content).map((file) => file.path));
+
+  function openFile(path: string) {
+    if (path === activeFile) return;
+    setWorkingFiles((current) => ({ ...current, [activeFile]: sync.text }));
+    setActiveFile(path);
+  }
+
+  async function createCommit(event: FormEvent) {
+    event.preventDefault();
+    if (!repository || !dirtyPaths.size || committing) return;
+    setCommitting(true);
+    setRepositoryError("");
+    try {
+      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/commits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ branch: repository.branch, expectedHeadOid: repository.headOid, author: "Achal Sood", message: commitMessage || `Update ${activeFile}`, files: workingSnapshot }),
+      });
+      const result = await response.json() as RepositorySnapshot | { error: string };
+      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Commit failed");
+      setRepository(result);
+      setWorkingFiles({});
+      setCommitMessage("");
+      setHistoryOpen(true);
+      flash(`Committed ${result.headOid.slice(0, 8)} to ${result.branch}`);
+    } catch (cause) {
+      setRepositoryError(cause instanceof Error ? cause.message : "Commit failed");
+    } finally {
+      setCommitting(false);
+    }
+  }
 
   function sendMessage(event: FormEvent) {
     event.preventDefault();
@@ -136,8 +206,8 @@ export default function Home() {
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="#" aria-label="MeshForge home"><span className="brand-mark"><span /></span><strong>MeshForge</strong></a>
-        <button className="repo-select"><span className="repo-cube">◇</span><strong>synapse-ai</strong><Icon name="chevron" size={14} /></button>
-        <button className="branch-pill"><Icon name="branch" size={17} /><span>feat/vector-search</span></button>
+        <button className="repo-select"><span className="repo-cube">◇</span><strong>{repository?.name ?? "synapse-ai"}</strong><Icon name="chevron" size={14} /></button>
+        <button className="branch-pill"><Icon name="branch" size={17} /><span>{repository?.branch ?? "main"}</span></button>
         <nav className="nav-tabs" aria-label="Repository navigation">
           {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => setActiveNav(item)}>{item}</button>)}
         </nav>
@@ -150,22 +220,28 @@ export default function Home() {
       <section className="workspace">
         <aside className="explorer panel">
           <div className="panel-heading"><span>Explorer</span><button aria-label="Collapse explorer">↤</button></div>
-          <div className="repo-row"><strong>synapse-ai</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
+          <div className="repo-row"><strong>{repository?.owner ?? "achalsood"}/{repository?.name ?? "synapse-ai"}</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
           <div className="file-tree">
             {tree.map((item, index) => (
-              <button key={`${item.name}-${index}`} style={{ paddingLeft: 13 + item.depth * 20 }} className={`tree-row ${item.active || activeFile === item.name ? "active" : ""}`} onClick={() => !item.type.startsWith("folder") && setActiveFile(item.name)}>
+              <button key={`${item.path}-${index}`} style={{ paddingLeft: 13 + item.depth * 20 }} className={`tree-row ${activeFile === item.path ? "active" : ""}`} onClick={() => !item.type.startsWith("folder") && openFile(item.path)}>
                 {item.type.startsWith("folder") && <span className={`tree-caret ${item.type === "folder-open" ? "open" : ""}`}>›</span>}
                 {item.type === "ts" ? <span className="ts-icon">TS</span> : <Icon name={item.type.startsWith("folder") ? "folder" : item.type as IconName} size={17} />}
-                <span>{item.name}</span>{item.badge && <em>{item.badge}</em>}
+                <span>{item.name}</span>{dirtyPaths.has(item.path) && <em>M</em>}
               </button>
             ))}
           </div>
-          <div className="explorer-foot"><Icon name="branch" size={14} /><span>3 staged changes</span><span>+34 −8</span></div>
+          <div className="explorer-foot"><Icon name="branch" size={14} /><span>{dirtyPaths.size} working {dirtyPaths.size === 1 ? "change" : "changes"}</span><span>{repository?.metrics.uniqueBlobCount ?? 0} blobs</span></div>
         </aside>
 
         <section className="editor panel">
-          <div className="editor-tabs"><button className="file-tab active"><span className="ts-icon">TS</span><span>{activeFile}</span><b>×</b></button><button className="icon-button" aria-label="New file"><Icon name="plus" size={16} /></button><span className="spacer"/><button className="icon-button" aria-label="Search"><Icon name="search" /></button><button className="icon-button" aria-label="Split editor"><Icon name="panel" /></button><button className="icon-button" aria-label="More editor options"><Icon name="more" /></button></div>
-          <div className="breadcrumbs">src <span>/</span> retrieval <span>/</span> <strong>{activeFile}</strong><span className={`sync-note ${sync.status}`}><Icon name={sync.status === "live" ? "check" : "radio"} size={13}/> {sync.status === "live" ? "Live · WebSocket" : sync.status}</span></div>
+          <div className="editor-tabs"><button className="file-tab active"><span className="ts-icon">TS</span><span>{activeFile.split("/").at(-1)}</span>{dirtyPaths.has(activeFile) && <i>●</i>}<b>×</b></button><button className="icon-button" aria-label="New file"><Icon name="plus" size={16} /></button><span className="spacer"/><button className="history-button" onClick={() => setHistoryOpen((open) => !open)}><Icon name="git" size={15}/>{repository?.headOid.slice(0, 8) ?? "loading"}</button><button className="icon-button" aria-label="Search"><Icon name="search" /></button><button className="icon-button" aria-label="Split editor"><Icon name="panel" /></button><button className="icon-button" aria-label="More editor options"><Icon name="more" /></button></div>
+          <div className="breadcrumbs">{activeFile.split("/").map((part, index, parts) => <span key={`${part}-${index}`} className={index === parts.length - 1 ? "crumb-current" : ""}>{part}{index < parts.length - 1 && <b>/</b>}</span>)}<span className={`sync-note ${sync.status}`}><Icon name={sync.status === "live" ? "check" : "radio"} size={13}/> {sync.status === "live" ? "Live · WebSocket" : sync.status}</span></div>
+          <form className="repo-toolbar" onSubmit={createCommit}>
+            <div><Icon name="git" size={15}/><span>{dirtyPaths.size ? `${dirtyPaths.size} modified ${dirtyPaths.size === 1 ? "file" : "files"}` : "Working tree clean"}</span></div>
+            <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Commit message" aria-label="Commit message" maxLength={160}/>
+            <button disabled={!dirtyPaths.size || committing}>{committing ? "Committing…" : "Commit changes"}</button>
+          </form>
+          {repositoryError && <div className="repository-error" role="alert">{repositoryError}</div>}
           <div className="code-wrap">
             <div className="code-pane live-code-pane">
               <div className="live-line-numbers" aria-hidden="true">{sync.text.split("\n").map((_, index) => <span key={index}>{index + 1}</span>)}</div>
@@ -183,6 +259,14 @@ export default function Home() {
           </div>
           <button className="ai-fab" onClick={() => setAiOpen((v) => !v)} aria-expanded={aiOpen}><Icon name="sparkles"/><span>Ask Mesh AI</span><kbd>⌘ K</kbd></button>
           {aiOpen && <div className="ai-card"><div><span className="ai-glyph"><Icon name="sparkles"/></span><div><strong>Optimize this index</strong><p>Mesh AI found one allocation hotspot and a safer adaptive efSearch strategy.</p></div></div><button onClick={() => flash("AI suggestion inserted as a reviewable patch")}>Review patch <span>+12 −4</span></button></div>}
+          {historyOpen && <aside className="history-drawer" aria-label="Commit history">
+            <header><div><Icon name="git"/><div><strong>Commit history</strong><span>{repository?.branch ?? "main"} · immutable DAG</span></div></div><button onClick={() => setHistoryOpen(false)} aria-label="Close history">×</button></header>
+            <div className="history-list">{repository?.history.map((commit, index) => <article key={commit.oid} className={index === 0 ? "head" : ""}>
+              <div className="commit-node"><i/><span/></div><div className="commit-body"><div><strong>{commit.message}</strong>{index === 0 && <em>HEAD</em>}</div><p>{commit.author} · {new Date(commit.createdAt).toLocaleString()}</p><code>{commit.shortOid}</code><span className="diff-total">+{commit.insertions} −{commit.deletions}</span>
+              {commit.diffs.length > 0 && <details><summary>{commit.filesChanged} {commit.filesChanged === 1 ? "file" : "files"} changed</summary>{commit.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
+              </div></article>)}</div>
+            <footer><span>{repository?.metrics.objectCount ?? 0} objects</span><span>{repository?.metrics.deduplicatedBytes ?? 0} bytes deduplicated</span></footer>
+          </aside>}
         </section>
 
         <aside className="collab panel">

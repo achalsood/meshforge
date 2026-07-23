@@ -94,10 +94,21 @@ export function useRoomSync(roomId: string, initialText: string) {
   }, [sendEvents]);
 
   useEffect(() => {
+    replica.current = ReplicatedText.fromText(initialText);
+    seenEvents.current.clear();
+    latestSeq.current = 0;
+    sequence.current = 0;
     clientId.current = createClientId();
-    setSelfId(clientId.current);
     let cancelled = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setText(initialText);
+      setPresence([]);
+      setChats([]);
+      setAppliedOperations(0);
+      setSelfId(clientId.current);
+    });
 
     const replay = async () => {
       const started = performance.now();
@@ -150,7 +161,7 @@ export function useRoomSync(roomId: string, initialText: string) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket.current?.close();
     };
-  }, [heartbeat, processEvents, roomId]);
+  }, [heartbeat, initialText, processEvents, roomId]);
 
   const edit = useCallback((nextText: string) => {
     const before = replica.current.toString();
