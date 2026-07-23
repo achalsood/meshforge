@@ -1,6 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AUDIO_INPUT_STORAGE_KEY,
+  AUDIO_OUTPUT_STORAGE_KEY,
+  listAudioDevices,
+  microphoneConstraints,
+  resolveDeviceId,
+  type AudioDeviceOption,
+} from "./audio-devices";
 import type { PresenceRecord, RealtimeSignal, SignalReplayResponse, WebRTCSignal } from "./protocol";
 import { shouldInitiateOffer, signalTargetsPeer } from "./signaling";
 
@@ -26,14 +34,87 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
   const [error, setError] = useState("");
+  const [deviceError, setDeviceError] = useState("");
+  const [inputDevices, setInputDevices] = useState<AudioDeviceOption[]>([]);
+  const [outputDevices, setOutputDevices] = useState<AudioDeviceOption[]>([]);
+  const [inputDeviceId, setInputDeviceId] = useState(() =>
+    typeof window === "undefined" ? "" : localStorage.getItem(AUDIO_INPUT_STORAGE_KEY) ?? "",
+  );
+  const [outputDeviceId, setOutputDeviceId] = useState(() =>
+    typeof window === "undefined" ? "" : localStorage.getItem(AUDIO_OUTPUT_STORAGE_KEY) ?? "",
+  );
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [outputSelectionSupported] = useState(() =>
+    typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype,
+  );
   const [peerStates, setPeerStates] = useState<Record<string, PeerState>>({});
   const stream = useRef<MediaStream | null>(null);
+  const inputDeviceIdRef = useRef(inputDeviceId);
+  const outputDeviceIdRef = useRef(outputDeviceId);
   const signaling = useRef<AbortController | null>(null);
   const signalSequence = useRef(0);
   const peers = useRef(new Map<string, RTCPeerConnection>());
   const audioElements = useRef(new Map<string, HTMLAudioElement>());
   const pendingCandidates = useRef(new Map<string, RTCIceCandidateInit[]>());
   const meter = useRef<{ context: AudioContext; timer: ReturnType<typeof setInterval> } | null>(null);
+
+  const stopMeter = useCallback(() => {
+    if (!meter.current) return;
+    clearInterval(meter.current.timer);
+    void meter.current.context.close();
+    meter.current = null;
+  }, []);
+
+  const startMeter = useCallback((localStream: MediaStream) => {
+    stopMeter();
+    const context = new AudioContext();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    context.createMediaStreamSource(localStream).connect(analyser);
+    const samples = new Uint8Array(analyser.fftSize);
+    const timer = setInterval(() => {
+      analyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) sum += ((sample - 128) / 128) ** 2;
+      setLevel(Math.sqrt(sum / samples.length));
+    }, 120);
+    meter.current = { context, timer };
+  }, [stopMeter]);
+
+  const refreshDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    setDevicesLoading(true);
+    setDeviceError("");
+    try {
+      const next = listAudioDevices(await navigator.mediaDevices.enumerateDevices());
+      setInputDevices(next.inputs);
+      setOutputDevices(next.outputs);
+      setInputDeviceId((current) => {
+        const resolved = resolveDeviceId(current, next.inputs);
+        inputDeviceIdRef.current = resolved;
+        if (current && !resolved) localStorage.removeItem(AUDIO_INPUT_STORAGE_KEY);
+        return resolved;
+      });
+      setOutputDeviceId((current) => {
+        const resolved = resolveDeviceId(current, next.outputs);
+        outputDeviceIdRef.current = resolved;
+        if (current && !resolved) localStorage.removeItem(AUDIO_OUTPUT_STORAGE_KEY);
+        return resolved;
+      });
+    } catch {
+      setDeviceError("Audio devices could not be listed");
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, []);
+
+  const applyOutputDevice = useCallback(async (deviceId: string) => {
+    const elements = [...audioElements.current.values()];
+    await Promise.all(elements.map(async (audio) => {
+      const selectable = audio as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+      if (selectable.setSinkId) await selectable.setSinkId(deviceId);
+    }));
+  }, []);
 
   const sendSignal = useCallback(async (signal: WebRTCSignal, targetClientId?: string) => {
     const packet: RealtimeSignal = { type: "signal", roomId, clientId: selfId, targetClientId, signal };
@@ -86,6 +167,10 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
         audioElements.current.set(peerId, audio);
       }
       audio.srcObject = remoteStream;
+      const selectable = audio as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+      if (selectable.setSinkId) void selectable.setSinkId(outputDeviceIdRef.current).catch(() => {
+        setDeviceError("The selected speaker is unavailable");
+      });
       void audio.play().catch(() => undefined);
     });
     connection.addEventListener("connectionstatechange", () => {
@@ -145,16 +230,12 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
     for (const peerId of [...peers.current.keys()]) removePeer(peerId);
     for (const track of stream.current?.getTracks() ?? []) track.stop();
     stream.current = null;
-    if (meter.current) {
-      clearInterval(meter.current.timer);
-      void meter.current.context.close();
-      meter.current = null;
-    }
+    stopMeter();
     setLevel(0);
     setMuted(false);
     setPeerStates({});
     setStatus("idle");
-  }, [removePeer, sendSignal]);
+  }, [removePeer, sendSignal, stopMeter]);
 
   const join = useCallback(async () => {
     if (!enabled || !selfId || status === "requesting" || status === "connecting" || status === "connected") return;
@@ -163,22 +244,12 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error("Microphone access is unavailable in this browser");
       const localStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: microphoneConstraints(inputDeviceIdRef.current),
         video: false,
       });
       stream.current = localStream;
-      const context = new AudioContext();
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 512;
-      context.createMediaStreamSource(localStream).connect(analyser);
-      const samples = new Uint8Array(analyser.fftSize);
-      const timer = setInterval(() => {
-        analyser.getByteTimeDomainData(samples);
-        let sum = 0;
-        for (const sample of samples) sum += ((sample - 128) / 128) ** 2;
-        setLevel(Math.sqrt(sum / samples.length));
-      }, 120);
-      meter.current = { context, timer };
+      startMeter(localStream);
+      await refreshDevices();
 
       setStatus("connecting");
       const controller = new AbortController();
@@ -228,11 +299,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       signaling.current = null;
       for (const track of stream.current?.getTracks() ?? []) track.stop();
       stream.current = null;
-      if (meter.current) {
-        clearInterval(meter.current.timer);
-        void meter.current.context.close();
-        meter.current = null;
-      }
+      stopMeter();
       setLevel(0);
       const message = cause instanceof DOMException && cause.name === "NotAllowedError"
         ? "Microphone permission was not granted"
@@ -242,7 +309,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       setError(message);
       setStatus("error");
     }
-  }, [createOffer, enabled, handleSignal, presence, repositoryQuery, roomId, selfId, sendSignal, status]);
+  }, [createOffer, enabled, handleSignal, presence, refreshDevices, repositoryQuery, roomId, selfId, sendSignal, startMeter, status, stopMeter]);
 
   const toggleMute = useCallback(() => {
     const next = !muted;
@@ -250,8 +317,83 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
     setMuted(next);
   }, [muted]);
 
+  const selectInputDevice = useCallback(async (deviceId: string) => {
+    setDeviceError("");
+    if (!stream.current) {
+      inputDeviceIdRef.current = deviceId;
+      setInputDeviceId(deviceId);
+      if (deviceId) localStorage.setItem(AUDIO_INPUT_STORAGE_KEY, deviceId);
+      else localStorage.removeItem(AUDIO_INPUT_STORAGE_KEY);
+      return;
+    }
+
+    try {
+      const replacement = await navigator.mediaDevices.getUserMedia({
+        audio: microphoneConstraints(deviceId),
+        video: false,
+      });
+      const nextTrack = replacement.getAudioTracks()[0];
+      if (!nextTrack) throw new Error("The selected microphone is unavailable");
+      nextTrack.enabled = !muted;
+      await Promise.all([...peers.current.values()].map(async (peer) => {
+        const sender = peer.getSenders().find((candidate) => candidate.track?.kind === "audio");
+        if (sender) await sender.replaceTrack(nextTrack);
+      }));
+      for (const track of stream.current.getTracks()) track.stop();
+      stream.current = replacement;
+      startMeter(replacement);
+      inputDeviceIdRef.current = deviceId;
+      setInputDeviceId(deviceId);
+      if (deviceId) localStorage.setItem(AUDIO_INPUT_STORAGE_KEY, deviceId);
+      else localStorage.removeItem(AUDIO_INPUT_STORAGE_KEY);
+      await refreshDevices();
+    } catch (cause) {
+      setDeviceError(cause instanceof Error ? cause.message : "The selected microphone is unavailable");
+    }
+  }, [muted, refreshDevices, startMeter]);
+
+  const selectOutputDevice = useCallback(async (deviceId: string) => {
+    setDeviceError("");
+    try {
+      await applyOutputDevice(deviceId);
+      outputDeviceIdRef.current = deviceId;
+      setOutputDeviceId(deviceId);
+      if (deviceId) localStorage.setItem(AUDIO_OUTPUT_STORAGE_KEY, deviceId);
+      else localStorage.removeItem(AUDIO_OUTPUT_STORAGE_KEY);
+    } catch {
+      setDeviceError("The selected speaker is unavailable");
+    }
+  }, [applyOutputDevice]);
+
+  useEffect(() => {
+    const handleDeviceChange = () => void refreshDevices();
+    navigator.mediaDevices?.addEventListener?.("devicechange", handleDeviceChange);
+    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", handleDeviceChange);
+  }, [refreshDevices]);
+
   useEffect(() => () => leave(), [leave]);
 
   const connectedPeers = Object.values(peerStates).filter((state) => state === "connected").length;
-  return { status, muted, level, speaking: status === "connected" && !muted && level > 0.035, error, peerStates, connectedPeers, join, leave, toggleMute };
+  return {
+    status,
+    muted,
+    level,
+    speaking: status === "connected" && !muted && level > 0.035,
+    error,
+    deviceError,
+    peerStates,
+    connectedPeers,
+    inputDevices,
+    outputDevices,
+    inputDeviceId,
+    outputDeviceId,
+    devicesLoading,
+    outputSelectionSupported,
+    join,
+    leave,
+    toggleMute,
+    refreshDevices,
+    selectInputDevice,
+    selectOutputDevice,
+  };
 }

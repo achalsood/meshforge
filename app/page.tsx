@@ -107,6 +107,7 @@ export default function Home() {
   const [authError, setAuthError] = useState("");
   const [repoMenuOpen, setRepoMenuOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [newRepositoryName, setNewRepositoryName] = useState("");
   const [creatingRepository, setCreatingRepository] = useState(false);
   const [teamOpen, setTeamOpen] = useState(false);
@@ -230,6 +231,15 @@ export default function Home() {
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [accountMenuOpen]);
+
+  useEffect(() => {
+    if (!deviceMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDeviceMenuOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [deviceMenuOpen]);
 
   useEffect(() => {
     if (!repositoryOwner || !repositoryName || (activeNav !== "Issues" && activeNav !== "Actions")) return;
@@ -959,7 +969,16 @@ export default function Home() {
                 : peerState === "connected" ? "Audio connected" : peerState === "connecting" ? "Connecting audio" : "Available";
               return <div className="person" key={person.clientId}><span className={`avatar ${person.color}`}>{person.name.slice(0,2).toUpperCase()}</span><div><strong>{person.name}</strong><small className={personStatus === "Speaking" ? "speaking" : ""}>{personStatus}</small></div>{isSelf && audio.speaking ? <div className="waveform" style={{opacity: Math.min(1, .45 + audio.level * 8)}}>{Array.from({length: 17}).map((_, i) => <i key={i} style={{height: `${5 + ((i * 7) % 17)}px`}} />)}</div> : <span className={`presence-dot ${peerState === "connected" || (isSelf && audio.status === "connected") ? "audio-live" : ""}`}/>}</div>;
             })}</div>
-            <div className="call-controls"><button disabled={audio.status !== "connected" || !can("audio")} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button><button disabled={audio.status !== "connected" || !can("audio")} aria-label="Audio device options"><Icon name="chevron" size={14}/></button><button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={!can("audio") || audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button><button aria-label="Room settings" onClick={() => flash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button><button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={audio.leave}><Icon name="phone"/></button></div>
+            <div className="call-controls-wrap">
+              <div className="call-controls"><button disabled={audio.status !== "connected" || !can("audio")} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button><button disabled={!can("audio")} className={deviceMenuOpen ? "active" : ""} onClick={() => { setDeviceMenuOpen((open) => !open); void audio.refreshDevices(); }} aria-label="Choose microphone and speaker" aria-expanded={deviceMenuOpen} aria-haspopup="dialog" aria-controls="audio-device-menu"><Icon name="chevron" size={14}/></button><button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={!can("audio") || audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button><button aria-label="Room settings" onClick={() => flash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button><button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={() => { audio.leave(); setDeviceMenuOpen(false); }}><Icon name="phone"/></button></div>
+              {deviceMenuOpen && <div className="device-menu" id="audio-device-menu" role="dialog" aria-label="Voice chat devices">
+                <header><div><strong>Voice chat devices</strong><span>{audio.devicesLoading ? "Finding devices…" : "Changes apply immediately"}</span></div><button onClick={() => setDeviceMenuOpen(false)} aria-label="Close audio device options">×</button></header>
+                <label><span>Microphone</span><select value={audio.inputDeviceId} onChange={(event) => void audio.selectInputDevice(event.target.value)} disabled={audio.devicesLoading}><option value="">System default</option>{audio.inputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
+                <label><span>Speaker</span><select value={audio.outputDeviceId} onChange={(event) => void audio.selectOutputDevice(event.target.value)} disabled={audio.devicesLoading || !audio.outputSelectionSupported}><option value="">System default</option>{audio.outputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
+                {!audio.outputSelectionSupported && <p>Speaker selection is not supported by this browser. Your system default will be used.</p>}
+                {audio.deviceError && <p className="audio-error" role="alert">{audio.deviceError}</p>}
+              </div>}
+            </div>
             {audio.status === "requesting" && <p className="audio-help">Choose Allow in the microphone permission prompt.</p>}
             {audio.error && <p className="audio-error" role="alert">{audio.error}</p>}
           </section>
