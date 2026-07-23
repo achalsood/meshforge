@@ -17,7 +17,7 @@
 | Room coordinator | Order broadcasts, retain hot state, issue snapshots | Durable stateful worker |
 | Collaboration core | RGA operations, dependency queues, replay, compaction | TypeScript library (core implemented) |
 | Repository service | Git objects, refs, diffs, pull requests | Worker API + object storage + SQL metadata |
-| Media plane | Audio transport, mute state, and active-speaker metering | WebRTC mesh (implemented); SFU at scale |
+| Media plane | Audio transport, short-lived signaling, mute state, and active-speaker metering | WebRTC mesh + HTTP signaling (implemented); SFU at scale |
 | AI patch service | Context selection, inference, diff validation | Retrieval pipeline + sandbox worker |
 
 ## Data structures worth discussing in interviews
@@ -52,6 +52,10 @@ Presence is ephemeral and uses a hash map keyed by connection ID plus a min-heap
 6. The coordinator compacts tombstones after every active replica has crossed the safe version boundary.
 
 The current deployment implements steps 1–5. WebSockets are the low-latency fast path. A D1 event log is the source for reconnect replay and periodic reconciliation, so a socket reconnect or isolate change cannot silently lose acknowledged state. Presence is held separately with a 15-second lease. Safe tombstone compaction remains the next protocol milestone.
+
+## Audio path
+
+WebRTC carries audio directly between peers; the application server never receives media. Offer, answer, ICE candidate, ready, and leave messages use a room-scoped HTTP signaling queue so authentication gateways that do not support WebSocket upgrades cannot block audio setup. Signaling records are indexed by room and sequence, polled incrementally, capped per response, and deleted after 60 seconds.
 
 ## Performance plan
 

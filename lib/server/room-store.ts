@@ -1,4 +1,4 @@
-import type { PresencePayload, PresenceRecord, ReplayResponse, RoomEvent } from "../collaboration/protocol";
+import type { PresencePayload, PresenceRecord, RealtimeSignal, ReplayResponse, RoomEvent, SignalReplayResponse, WebRTCSignal } from "../collaboration/protocol";
 
 let schemaReady: Promise<void> | null = null;
 
@@ -26,6 +26,16 @@ export async function ensureRoomSchema(db: D1Database): Promise<void> {
         PRIMARY KEY (room_id, client_id)
       )`),
       db.prepare("CREATE INDEX IF NOT EXISTS room_presence_room_seen_idx ON room_presence (room_id, last_seen)"),
+      db.prepare(`CREATE TABLE IF NOT EXISTS audio_signals (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        room_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        target_client_id TEXT,
+        signal TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS audio_signals_room_seq_idx ON audio_signals (room_id, seq)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS audio_signals_created_at_idx ON audio_signals (created_at)"),
     ]).then(() => undefined).catch((error) => {
       schemaReady = null;
       throw error;
@@ -110,4 +120,42 @@ export async function replayRoom(db: D1Database, roomId: string, since: number):
     lastSeen: row.last_seen,
   }));
   return { events, latestSeq: rows.at(-1)?.seq ?? since, presence };
+}
+
+interface SignalRow {
+  seq: number;
+  client_id: string;
+  target_client_id: string | null;
+  signal: string;
+  created_at: number;
+}
+
+export async function persistAudioSignal(db: D1Database, roomId: string, packet: RealtimeSignal): Promise<number> {
+  await ensureRoomSchema(db);
+  const now = Date.now();
+  const [insert] = await db.batch([
+    db.prepare(`INSERT INTO audio_signals
+      (room_id, client_id, target_client_id, signal, created_at)
+      VALUES (?, ?, ?, ?, ?)`)
+      .bind(roomId, packet.clientId, packet.targetClientId ?? null, JSON.stringify(packet.signal), now),
+    db.prepare("DELETE FROM audio_signals WHERE created_at < ?").bind(now - 60_000),
+  ]);
+  return Number(insert.meta.last_row_id ?? 0);
+}
+
+export async function replayAudioSignals(db: D1Database, roomId: string, since: number): Promise<SignalReplayResponse> {
+  await ensureRoomSchema(db);
+  const result = await db.prepare(`SELECT seq, client_id, target_client_id, signal, created_at
+    FROM audio_signals WHERE room_id = ? AND seq > ? ORDER BY seq ASC LIMIT 200`)
+    .bind(roomId, since).all<SignalRow>();
+  const signals = (result.results ?? []).map((row) => ({
+    type: "signal" as const,
+    roomId,
+    seq: row.seq,
+    clientId: row.client_id,
+    ...(row.target_client_id ? { targetClientId: row.target_client_id } : {}),
+    signal: JSON.parse(row.signal) as WebRTCSignal,
+    createdAt: row.created_at,
+  }));
+  return { signals, latestSeq: signals.at(-1)?.seq ?? since };
 }

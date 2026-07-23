@@ -2,7 +2,8 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
-import { persistRoomEvents, replayRoom } from "../lib/server/room-store";
+import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
+import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
 
 interface Env {
   ASSETS: Fetcher;
@@ -78,6 +79,25 @@ async function handleRoomEvents(request: Request, env: Env, roomId: string): Pro
   return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
 }
 
+async function handleAudioSignals(request: Request, env: Env, roomId: string): Promise<Response> {
+  if (request.method === "GET") {
+    const since = Math.max(0, Number(new URL(request.url).searchParams.get("since")) || 0);
+    return Response.json(await replayAudioSignals(env.DB, roomId, since), {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+  if (request.method === "POST") {
+    const raw = await request.text();
+    if (raw.length > 128_000) return Response.json({ error: "Signal is too large" }, { status: 413 });
+    let packet: unknown;
+    try { packet = JSON.parse(raw); } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
+    if (!isRealtimeSignalPacket(packet, roomId)) return Response.json({ error: "Invalid signal" }, { status: 400 });
+    const seq = await persistAudioSignal(env.DB, roomId, packet);
+    return Response.json({ accepted: true, seq }, { status: 202 });
+  }
+  return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -95,6 +115,9 @@ const worker = {
 
     const eventMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/events$/i);
     if (eventMatch) return handleRoomEvents(request, env, eventMatch[1]);
+
+    const signalMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/signals$/i);
+    if (signalMatch) return handleAudioSignals(request, env, signalMatch[1]);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

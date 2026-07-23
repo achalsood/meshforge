@@ -22,3 +22,15 @@ export const roomPresence = sqliteTable("room_presence", {
   primaryKey({ columns: [table.roomId, table.clientId] }),
   index("room_presence_room_seen_idx").on(table.roomId, table.lastSeen),
 ]);
+
+export const audioSignals = sqliteTable("audio_signals", {
+  seq: integer("seq").primaryKey({ autoIncrement: true }),
+  roomId: text("room_id").notNull(),
+  clientId: text("client_id").notNull(),
+  targetClientId: text("target_client_id"),
+  signal: text("signal").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [
+  index("audio_signals_room_seq_idx").on(table.roomId, table.seq),
+  index("audio_signals_created_at_idx").on(table.createdAt),
+]);

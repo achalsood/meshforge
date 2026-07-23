@@ -20,7 +20,7 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - WebSocket fast path with durable replay and polling recovery
 - Voice-room controls and speaking state
 - Working room chat composer
-- Peer-to-peer WebRTC audio with ephemeral room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
+- Peer-to-peer WebRTC audio with short-lived room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
 - AI optimization card with reviewable patch action
 - CRDT throughput, peer count, connection, and p95 latency telemetry
 - Responsive layout that preserves the editor and collapses secondary panels
@@ -52,7 +52,7 @@ This structure avoids repeatedly scanning the entire document when translating b
 1. **Experience prototype** — current interactive workspace.
 2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
 3. **Source management** — repositories, branches, commits, diffs, pull requests, object deduplication, permissions.
-4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and ephemeral signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
+4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
 5. **AI review** — repository-aware retrieval, structured patch generation, sandboxed validation, eval harness.
 6. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
 
@@ -74,4 +74,4 @@ npm run lint
 npm test
 ```
 
-The production build emits a Cloudflare-compatible worker artifact. Text operations, chat events, and presence heartbeats use the realtime room protocol; text and chat survive socket reconnects through the durable event log. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. Signaling is intentionally ephemeral and SDP/ICE data is not stored. A TURN service is still required for reliable connectivity across restrictive enterprise networks.
+The production build emits a Cloudflare-compatible worker artifact. Text operations, chat events, and presence heartbeats use the realtime room protocol; text and chat survive socket reconnects through the durable event log. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. SDP/ICE signaling records expire after 60 seconds and audio media is never stored or relayed through the application server. A TURN service is still required for reliable connectivity across restrictive enterprise networks.

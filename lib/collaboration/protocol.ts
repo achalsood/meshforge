@@ -56,3 +56,13 @@ export interface RealtimeSignal {
   targetClientId?: string;
   signal: WebRTCSignal;
 }
+
+export interface SignalRecord extends RealtimeSignal {
+  seq: number;
+  createdAt: number;
+}
+
+export interface SignalReplayResponse {
+  signals: SignalRecord[];
+  latestSeq: number;
+}

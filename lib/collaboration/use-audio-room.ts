@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PresenceRecord, RealtimeSignal, WebRTCSignal } from "./protocol";
+import type { PresenceRecord, RealtimeSignal, SignalReplayResponse, WebRTCSignal } from "./protocol";
 import { shouldInitiateOffer, signalTargetsPeer } from "./signaling";
 
 type AudioStatus = "idle" | "requesting" | "connecting" | "connected" | "error";
@@ -19,15 +19,21 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
   const [error, setError] = useState("");
   const [peerStates, setPeerStates] = useState<Record<string, PeerState>>({});
   const stream = useRef<MediaStream | null>(null);
-  const signaling = useRef<WebSocket | null>(null);
+  const signaling = useRef<AbortController | null>(null);
+  const signalSequence = useRef(0);
   const peers = useRef(new Map<string, RTCPeerConnection>());
   const audioElements = useRef(new Map<string, HTMLAudioElement>());
   const pendingCandidates = useRef(new Map<string, RTCIceCandidateInit[]>());
   const meter = useRef<{ context: AudioContext; timer: ReturnType<typeof setInterval> } | null>(null);
 
-  const sendSignal = useCallback((signal: WebRTCSignal, targetClientId?: string) => {
+  const sendSignal = useCallback(async (signal: WebRTCSignal, targetClientId?: string) => {
     const packet: RealtimeSignal = { type: "signal", roomId, clientId: selfId, targetClientId, signal };
-    if (signaling.current?.readyState === WebSocket.OPEN) signaling.current.send(JSON.stringify(packet));
+    const response = await fetch(`/api/rooms/${roomId}/signals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(packet),
+    });
+    if (!response.ok) throw new Error("Audio signaling request failed");
   }, [roomId, selfId]);
 
   const removePeer = useCallback((peerId: string) => {
@@ -55,7 +61,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
     const connection = new RTCPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: "max-bundle" });
     for (const track of stream.current.getTracks()) connection.addTrack(track, stream.current);
     connection.addEventListener("icecandidate", (event) => {
-      if (event.candidate) sendSignal({ kind: "candidate", candidate: event.candidate.toJSON() }, peerId);
+      if (event.candidate) void sendSignal({ kind: "candidate", candidate: event.candidate.toJSON() }, peerId).catch(() => undefined);
     });
     connection.addEventListener("track", (event) => {
       const remoteStream = event.streams[0];
@@ -88,7 +94,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
     if (connection.signalingState !== "stable" || connection.localDescription) return;
     const offer = await connection.createOffer({ offerToReceiveAudio: true });
     await connection.setLocalDescription(offer);
-    sendSignal({ kind: "description", description: offer }, peerId);
+    await sendSignal({ kind: "description", description: offer }, peerId);
     setPeerStates((current) => ({ ...current, [peerId]: "connecting" }));
   }, [ensurePeer, sendSignal]);
 
@@ -112,7 +118,7 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       if (packet.signal.description.type === "offer") {
         const answer = await connection.createAnswer();
         await connection.setLocalDescription(answer);
-        sendSignal({ kind: "description", description: answer }, peerId);
+        await sendSignal({ kind: "description", description: answer }, peerId);
       }
       return;
     }
@@ -123,9 +129,10 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
   }, [createOffer, ensurePeer, removePeer, selfId, sendSignal]);
 
   const leave = useCallback(() => {
-    if (signaling.current?.readyState === WebSocket.OPEN) sendSignal({ kind: "leave" });
-    signaling.current?.close();
+    if (stream.current) void sendSignal({ kind: "leave" }).catch(() => undefined);
+    signaling.current?.abort();
     signaling.current = null;
+    signalSequence.current = 0;
     for (const peerId of [...peers.current.keys()]) removePeer(peerId);
     for (const track of stream.current?.getTracks() ?? []) track.stop();
     stream.current = null;
@@ -165,31 +172,64 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       meter.current = { context, timer };
 
       setStatus("connecting");
-      const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${scheme}//${window.location.host}/api/realtime/${roomId}`);
-      signaling.current = socket;
-      socket.addEventListener("open", () => {
-        setStatus("connected");
-        sendSignal({ kind: "ready" });
-        for (const peer of presence) if (shouldInitiateOffer(selfId, peer.clientId)) void createOffer(peer.clientId);
+      const controller = new AbortController();
+      signaling.current = controller;
+      const baselineResponse = await fetch(`/api/rooms/${roomId}/signals?since=0`, {
+        cache: "no-store",
+        signal: controller.signal,
       });
-      socket.addEventListener("message", (message) => {
-        try {
-          const packet = JSON.parse(String(message.data)) as RealtimeSignal | { type: string };
-          if (packet.type === "signal") void handleSignal(packet as RealtimeSignal).catch(() => undefined);
-        } catch { /* malformed signaling messages are ignored */ }
-      });
-      socket.addEventListener("close", () => {
-        if (stream.current) setStatus("error");
-      });
-      socket.addEventListener("error", () => {
-        setError("Could not reach the audio signaling room");
-        setStatus("error");
-      });
+      if (!baselineResponse.ok) throw new Error("Audio signaling request failed");
+      const baseline = await baselineResponse.json() as SignalReplayResponse;
+      signalSequence.current = baseline.latestSeq;
+      await sendSignal({ kind: "ready" });
+      setStatus("connected");
+      for (const peer of presence) {
+        if (shouldInitiateOffer(selfId, peer.clientId)) {
+          void createOffer(peer.clientId).catch(() => {
+            setError("Audio signaling request failed");
+            setStatus("error");
+            controller.abort();
+          });
+        }
+      }
+
+      const poll = async () => {
+        while (!controller.signal.aborted) {
+          try {
+            const response = await fetch(`/api/rooms/${roomId}/signals?since=${signalSequence.current}`, {
+              cache: "no-store",
+              signal: controller.signal,
+            });
+            if (!response.ok) throw new Error("Audio signaling request failed");
+            const replay = await response.json() as SignalReplayResponse;
+            signalSequence.current = Math.max(signalSequence.current, replay.latestSeq);
+            for (const packet of replay.signals) await handleSignal(packet);
+            await new Promise((resolve) => setTimeout(resolve, 450));
+          } catch (cause) {
+            if (controller.signal.aborted) return;
+            setError(cause instanceof Error ? cause.message : "Could not reach the audio signaling room");
+            setStatus("error");
+            controller.abort();
+          }
+        }
+      };
+      void poll();
     } catch (cause) {
+      signaling.current?.abort();
+      signaling.current = null;
+      for (const track of stream.current?.getTracks() ?? []) track.stop();
+      stream.current = null;
+      if (meter.current) {
+        clearInterval(meter.current.timer);
+        void meter.current.context.close();
+        meter.current = null;
+      }
+      setLevel(0);
       const message = cause instanceof DOMException && cause.name === "NotAllowedError"
         ? "Microphone permission was not granted"
-        : cause instanceof Error ? cause.message : "Could not start audio";
+        : cause instanceof Error && cause.message === "Audio signaling request failed"
+          ? "Could not reach the audio signaling room"
+          : cause instanceof Error ? cause.message : "Could not start audio";
       setError(message);
       setStatus("error");
     }
