@@ -24,6 +24,8 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Optimistic branch-head checks and Myers line-diff statistics for each commit
 - Branch creation and switching, pull-request snapshots, changed-file review, and guarded merge commits with two parents
 - Editable shared source document with room-scoped presence and cursor offsets
+- Binary CRDT v1 WebSocket frames with replica dictionaries, varint identifiers, durable base64 replay, and legacy JSON decoding
+- Causal-safe tombstone payload compaction that retains structural anchors for delayed operations
 - WebSocket fast path with durable replay and polling recovery
 - Voice-room controls and speaking state
 - Working room chat composer
@@ -61,7 +63,7 @@ This structure avoids repeatedly scanning the entire document when translating b
 ## Product roadmap
 
 1. **Experience prototype** — current interactive workspace.
-2. **Realtime text** — implemented: WebSocket rooms, durable operation replay, sequence CRDT, live presence, reconnect backoff, polling recovery, and shuffled-delivery convergence tests. Next: binary operation encoding and tombstone compaction.
+2. **Realtime text** — implemented: versioned binary operation encoding, binary WebSocket frames, JSON-compatible durable replay, causal-safe tombstone payload compaction, sequence CRDT, live presence, reconnect backoff, polling recovery, malformed-frame checks, and shuffled-delivery convergence tests. Next: room epochs, stable-frontier snapshots, and large-document chunking.
 3. **Source management** — implemented multiple repositories, authenticated authorship, owner/maintainer/contributor/viewer RBAC, repository invitations, content-addressed snapshots, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, durable issues, and stale-base protection. Next: conflict-aware rebasing and inline review comments.
 4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
 5. **Repository intelligence** — implemented local dependency analysis, risk ranking, rolling-hash duplicate detection, complexity hotspots, and deterministic patch generation with no external API dependency. Next: language-aware parsers, test-impact analysis, and an offline open-weight model option.
@@ -86,4 +88,4 @@ npm run lint
 npm test
 ```
 
-The production build emits a Cloudflare-compatible worker artifact. Text operations, chat events, and presence heartbeats use the realtime room protocol; text and chat survive socket reconnects through the durable event log. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. SDP/ICE signaling records expire after 60 seconds and audio media is never stored or relayed through the application server. A TURN service is still required for reliable connectivity across restrictive enterprise networks.
+The production build emits a Cloudflare-compatible worker artifact. Text operations use compact binary frames on live WebSockets and a versioned base64 envelope in the durable event log; legacy JSON operation payloads remain readable during rollout. Deleted character payloads are compacted after an idle window while their RGA anchors remain available for late-arriving children. Chat and presence retain their readable JSON protocol. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. SDP/ICE signaling records expire after 60 seconds and audio media is never stored or relayed through the application server. A TURN service is still required for reliable connectivity across restrictive enterprise networks.

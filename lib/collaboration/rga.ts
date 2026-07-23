@@ -17,8 +17,17 @@ export type TextOperation = InsertOperation | DeleteOperation;
 interface CharacterNode {
   id: string;
   parentId: string;
-  value: string;
+  value: string | null;
   deleted: boolean;
+}
+
+export interface ReplicatedTextMetrics {
+  nodes: number;
+  visible: number;
+  tombstones: number;
+  compactedTombstones: number;
+  pendingInserts: number;
+  pendingDeletes: number;
 }
 
 function insertSorted(values: string[], value: string): void {
@@ -140,7 +149,7 @@ export class ReplicatedText {
 
   toString(): string {
     let result = "";
-    this.walk((node) => { if (!node.deleted) result += node.value; });
+    this.walk((node) => { if (!node.deleted && node.value !== null) result += node.value; });
     return result;
   }
 
@@ -148,6 +157,46 @@ export class ReplicatedText {
     const ids: string[] = [];
     this.walk((node) => { if (!node.deleted) ids.push(node.id); });
     return ids;
+  }
+
+  /**
+   * Drops character payloads from deleted nodes while retaining their IDs and
+   * parent links as structural anchors. Keeping anchors is what makes this
+   * compaction safe when a delayed insert still references a deleted node.
+   */
+  compactTombstones(): number {
+    let compacted = 0;
+    for (const node of this.nodes.values()) {
+      if (node.deleted && node.value !== null) {
+        node.value = null;
+        compacted += 1;
+      }
+    }
+    return compacted;
+  }
+
+  metrics(): ReplicatedTextMetrics {
+    let visible = 0;
+    let tombstones = 0;
+    let compactedTombstones = 0;
+    for (const node of this.nodes.values()) {
+      if (node.deleted) {
+        tombstones += 1;
+        if (node.value === null) compactedTombstones += 1;
+      } else {
+        visible += 1;
+      }
+    }
+    let pendingInserts = 0;
+    for (const pending of this.pendingByParent.values()) pendingInserts += pending.length;
+    return {
+      nodes: this.nodes.size,
+      visible,
+      tombstones,
+      compactedTombstones,
+      pendingInserts,
+      pendingDeletes: this.pendingDeletes.size,
+    };
   }
 
   private walk(visit: (node: CharacterNode) => void): void {

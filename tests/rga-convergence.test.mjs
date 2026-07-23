@@ -48,3 +48,32 @@ test("resolves inserts and deletes received before their dependencies", () => {
   replica.applyAll(operations);
   assert.equal(replica.toString(), "ac");
 });
+
+test("compacts deleted payloads without removing causal anchors", () => {
+  const operations = [
+    { type: "insert", id: "peer:0001", parentId: "@root", value: "a" },
+    { type: "insert", id: "peer:0002", parentId: "peer:0001", value: "b" },
+    { type: "delete", id: "peer:0001" },
+  ];
+  const compacted = ReplicatedText.fromText("");
+  const reference = ReplicatedText.fromText("");
+  compacted.applyAll(operations);
+  reference.applyAll(operations);
+
+  assert.equal(compacted.compactTombstones(), 1);
+  assert.equal(compacted.compactTombstones(), 0);
+  assert.deepEqual(compacted.metrics(), {
+    nodes: 2,
+    visible: 1,
+    tombstones: 1,
+    compactedTombstones: 1,
+    pendingInserts: 0,
+    pendingDeletes: 0,
+  });
+
+  const delayed = { type: "insert", id: "peer:0003", parentId: "peer:0001", value: "c" };
+  compacted.apply(delayed);
+  reference.apply(delayed);
+  assert.equal(compacted.toString(), "bc");
+  assert.equal(compacted.toString(), reference.toString());
+});

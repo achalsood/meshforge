@@ -1,4 +1,5 @@
 import type { TextOperation } from "./rga";
+import type { BinaryOperationPayload } from "./binary-codec";
 
 export type RoomEventKind = "operations" | "chat" | "presence";
 
@@ -20,7 +21,7 @@ export interface RoomEvent {
   eventId: string;
   clientId: string;
   kind: RoomEventKind;
-  payload: { operations: TextOperation[] } | ChatPayload | PresencePayload;
+  payload: { operations: TextOperation[] } | BinaryOperationPayload | ChatPayload | PresencePayload;
   createdAt: number;
   seq?: number;
 }

@@ -2,6 +2,11 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
+import {
+  decodeBinaryOperationEvent,
+  operationPayload,
+  operationsFromPayload,
+} from "../lib/collaboration/binary-codec";
 import { roomSlug } from "../lib/collaboration/room-id";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
 import { hasRepositoryPermission } from "../lib/auth/permissions";
@@ -65,6 +70,11 @@ function assertRoomContext(request: Request, roomId: string, owner: string, name
 function sanitizeRealtimeEvents(events: RealtimeBatch["events"], user: AuthenticatedUser, canCollaborate: boolean): RealtimeBatch["events"] {
   return events.flatMap((event) => {
     if ((event.kind === "operations" || event.kind === "chat") && !canCollaborate) return [];
+    if (event.kind === "operations") {
+      const operations = operationsFromPayload(event.payload);
+      if (!operations?.length || operations.length > 10_000) return [];
+      return [{ ...event, payload: operationPayload(operations) }];
+    }
     if (event.kind === "chat" && "body" in event.payload) {
       return [{ ...event, payload: { ...event.payload, name: user.displayName, initials: user.initials } }];
     }
@@ -86,9 +96,23 @@ function acceptRealtimeSocket(request: Request, env: Env, roomId: string, user: 
   liveRooms.set(roomId, sockets);
   server.send(JSON.stringify({ type: "ready", roomId }));
 
-  server.addEventListener("message", (message) => {
-    if (typeof message.data !== "string" || message.data.length > 256_000) return;
+  server.addEventListener("message", async (message) => {
     try {
+      if (message.data instanceof ArrayBuffer) {
+        if (!canCollaborate || message.data.byteLength > 256_000) return;
+        const events = sanitizeRealtimeEvents(
+          [decodeBinaryOperationEvent(new Uint8Array(message.data))],
+          user,
+          canCollaborate,
+        );
+        if (!events.length) return;
+        await persistRoomEvents(env.DB, roomId, events);
+        for (const peer of sockets) {
+          if (peer !== server && peer.readyState === WebSocket.OPEN) peer.send(message.data);
+        }
+        return;
+      }
+      if (typeof message.data !== "string" || message.data.length > 256_000) return;
       const packet = JSON.parse(message.data) as RealtimeBatch | RealtimeSignal;
       if (packet.roomId !== roomId) return;
       if (packet.type === "batch") {
@@ -96,7 +120,7 @@ function acceptRealtimeSocket(request: Request, env: Env, roomId: string, user: 
         const events = sanitizeRealtimeEvents(packet.events, user, canCollaborate);
         if (!events.length) return;
         const serialized = JSON.stringify({ ...packet, events });
-        void persistRoomEvents(env.DB, roomId, events);
+        await persistRoomEvents(env.DB, roomId, events);
         for (const peer of sockets) {
           if (peer !== server && peer.readyState === WebSocket.OPEN) peer.send(serialized);
         }

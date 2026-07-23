@@ -1,8 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  base64ToBytes,
+  decodeBinaryOperationEvent,
+  encodeBinaryOperationEvent,
+  operationPayload,
+  operationsFromPayload,
+} from "./binary-codec";
 import type { ChatPayload, PresenceRecord, RealtimeBatch, ReplayResponse, RoomEvent } from "./protocol";
-import { ReplicatedText, type TextOperation } from "./rga";
+import { ReplicatedText } from "./rga";
 
 type SyncStatus = "connecting" | "live" | "recovering" | "offline";
 
@@ -40,6 +47,10 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const [chats, setChats] = useState<SyncedChat[]>([]);
   const [latency, setLatency] = useState(0);
   const [appliedOperations, setAppliedOperations] = useState(0);
+  const [binaryBytesSent, setBinaryBytesSent] = useState(0);
+  const [jsonBytesAvoided, setJsonBytesAvoided] = useState(0);
+  const [tombstones, setTombstones] = useState(0);
+  const [compactedTombstones, setCompactedTombstones] = useState(0);
   const [selfId, setSelfId] = useState("");
   const replica = useRef(ReplicatedText.fromText(initialText));
   const clientId = useRef("");
@@ -49,18 +60,42 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const reconnectAttempt = useRef(0);
   const seenEvents = useRef(new Set<string>());
   const selection = useRef({ from: 0, to: 0 });
+  const compactionDebt = useRef(0);
+  const compactionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateCompaction = useCallback((processed: number) => {
+    compactionDebt.current += processed;
+    const compact = () => {
+      replica.current.compactTombstones();
+      compactionDebt.current = 0;
+      const metrics = replica.current.metrics();
+      setTombstones(metrics.tombstones);
+      setCompactedTombstones(metrics.compactedTombstones);
+    };
+    if (compactionTimer.current) clearTimeout(compactionTimer.current);
+    if (compactionDebt.current >= 128) compact();
+    else {
+      const metrics = replica.current.metrics();
+      setTombstones(metrics.tombstones);
+      setCompactedTombstones(metrics.compactedTombstones);
+      compactionTimer.current = setTimeout(compact, 1_200);
+    }
+  }, []);
 
   const processEvents = useCallback((events: RoomEvent[]) => {
     let documentChanged = false;
     let operationCount = 0;
+    let processedOperations = 0;
     const incomingChats: SyncedChat[] = [];
     for (const event of events) {
       if (seenEvents.current.has(event.eventId)) continue;
       seenEvents.current.add(event.eventId);
       if (event.seq) latestSeq.current = Math.max(latestSeq.current, event.seq);
-      if (event.kind === "operations" && "operations" in event.payload) {
-        const operations = event.payload.operations as TextOperation[];
+      if (event.kind === "operations") {
+        const operations = operationsFromPayload(event.payload);
+        if (!operations) continue;
         operationCount += replica.current.applyAll(operations);
+        processedOperations += operations.length;
         documentChanged = true;
       } else if (event.kind === "chat" && "body" in event.payload) {
         incomingChats.push({ ...event.payload, eventId: event.eventId, createdAt: event.createdAt, clientId: event.clientId });
@@ -68,8 +103,9 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     }
     if (documentChanged) setText(replica.current.toString());
     if (operationCount) setAppliedOperations((count) => count + operationCount);
+    if (processedOperations) updateCompaction(processedOperations);
     if (incomingChats.length) setChats((current) => [...current, ...incomingChats].sort((a, b) => a.createdAt - b.createdAt).slice(-100));
-  }, []);
+  }, [updateCompaction]);
 
   const postFallback = useCallback(async (events: RoomEvent[]) => {
     const started = performance.now();
@@ -85,7 +121,10 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const sendEvents = useCallback((events: RoomEvent[]) => {
     if (!enabled) return;
     const batch: RealtimeBatch = { type: "batch", roomId, clientId: clientId.current, events };
-    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(batch));
+    if (socket.current?.readyState === WebSocket.OPEN) {
+      if (events.length === 1 && events[0].kind === "operations") socket.current.send(encodeBinaryOperationEvent(events[0]));
+      else socket.current.send(JSON.stringify(batch));
+    }
     else void postFallback(events).catch(() => setStatus("offline"));
   }, [enabled, postFallback, roomId]);
 
@@ -120,6 +159,10 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       setPresence([]);
       setChats([]);
       setAppliedOperations(0);
+      setBinaryBytesSent(0);
+      setJsonBytesAvoided(0);
+      setTombstones(0);
+      setCompactedTombstones(0);
       setSelfId(clientId.current);
     });
 
@@ -140,6 +183,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       setStatus(reconnectAttempt.current ? "recovering" : "connecting");
       const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
       const ws = new WebSocket(`${scheme}//${window.location.host}/api/realtime/${roomId}?${repositoryQuery}`);
+      ws.binaryType = "arraybuffer";
       socket.current = ws;
       ws.addEventListener("open", () => {
         reconnectAttempt.current = 0;
@@ -149,6 +193,10 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       });
       ws.addEventListener("message", (message) => {
         try {
+          if (message.data instanceof ArrayBuffer) {
+            processEvents([decodeBinaryOperationEvent(new Uint8Array(message.data))]);
+            return;
+          }
           const data = JSON.parse(String(message.data)) as RealtimeBatch | { type: string };
           if (data.type === "batch") processEvents((data as RealtimeBatch).events);
         } catch { /* malformed peer messages are ignored */ }
@@ -178,6 +226,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       clearInterval(replayTimer);
       clearInterval(heartbeatTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (compactionTimer.current) clearTimeout(compactionTimer.current);
       socket.current?.close();
     };
   }, [enabled, heartbeat, initialText, processEvents, repositoryQuery, roomId]);
@@ -189,16 +238,22 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     setText(replica.current.toString());
     if (!operations.length) return;
     setAppliedOperations((count) => count + operations.length);
+    updateCompaction(operations.length);
+    const payload = operationPayload(operations);
+    const binaryBytes = base64ToBytes(payload.data).byteLength;
+    const jsonBytes = new TextEncoder().encode(JSON.stringify({ operations })).byteLength;
+    setBinaryBytesSent((bytes) => bytes + binaryBytes);
+    setJsonBytesAvoided((bytes) => bytes + Math.max(0, jsonBytes - binaryBytes));
     const event: RoomEvent = {
       eventId: `${clientId.current}:ops:${++sequence.current}`,
       clientId: clientId.current,
       kind: "operations",
-      payload: { operations },
+      payload,
       createdAt: Date.now(),
     };
     seenEvents.current.add(event.eventId);
     sendEvents([event]);
-  }, [canWrite, sendEvents]);
+  }, [canWrite, sendEvents, updateCompaction]);
 
   const updateSelection = useCallback((from: number, to: number) => {
     selection.current = { from, to };
@@ -219,5 +274,8 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     sendEvents([event]);
   }, [canWrite, displayName, initials, sendEvents]);
 
-  return { text, status, presence, chats, latency, appliedOperations, selfId, edit, updateSelection, sendChat };
+  return {
+    text, status, presence, chats, latency, appliedOperations, binaryBytesSent,
+    jsonBytesAvoided, tombstones, compactedTombstones, selfId, edit, updateSelection, sendChat,
+  };
 }
