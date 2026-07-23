@@ -24,7 +24,7 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Voice-room controls and speaking state
 - Working room chat composer
 - Peer-to-peer WebRTC audio with short-lived room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
-- Self-contained Mesh Intelligence review with dependency graphs, complexity hotspots, security/performance rules, duplicate-code detection, and deterministic patches
+- Self-contained Mesh Intelligence review with stack-based syntax preflight, exact error locations, dependency graphs, complexity hotspots, security/performance rules, duplicate-code detection, and deterministic patches
 - CRDT throughput, peer count, connection, and p95 latency telemetry
 - Responsive layout that preserves the editor and collapses secondary panels
 

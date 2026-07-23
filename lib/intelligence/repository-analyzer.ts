@@ -1,5 +1,5 @@
 export type FindingSeverity = "critical" | "high" | "medium" | "low";
-export type FindingCategory = "security" | "performance" | "reliability" | "complexity" | "maintainability";
+export type FindingCategory = "syntax" | "security" | "performance" | "reliability" | "complexity" | "maintainability";
 
 export interface SuggestedPatch {
   path: string;
@@ -16,6 +16,7 @@ export interface AnalysisFinding {
   explanation: string;
   path: string;
   line: number;
+  column: number;
   evidence: string;
   score: number;
   suggestion: string;
@@ -36,6 +37,7 @@ export interface RepositoryAnalysis {
     high: number;
     dependencyEdges: number;
     duplicateBlocks: number;
+    syntaxErrors: number;
   };
   findings: AnalysisFinding[];
   hotspots: FileHotspot[];
@@ -86,9 +88,16 @@ function lineAt(content: string, index: number): number {
   return content.slice(0, Math.max(0, index)).split("\n").length;
 }
 
-function stableId(path: string, line: number, title: string): string {
+function locationAt(content: string, index: number): { line: number; column: number } {
+  const safeIndex = Math.max(0, Math.min(index, content.length));
+  const line = lineAt(content, safeIndex);
+  const lastBreak = content.lastIndexOf("\n", safeIndex - 1);
+  return { line, column: safeIndex - lastBreak };
+}
+
+function stableId(path: string, line: number, column: number, title: string): string {
   let hash = 2166136261;
-  for (const character of `${path}:${line}:${title}`) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
+  for (const character of `${path}:${line}:${column}:${title}`) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
   return `mesh-${(hash >>> 0).toString(16)}`;
 }
 
@@ -152,13 +161,122 @@ function duplicateBlocks(files: SourceFile[], width = 5): Array<{ first: string;
   return duplicates;
 }
 
-function makeFinding(file: SourceFile, index: number, input: Omit<AnalysisFinding, "id" | "path" | "line" | "score">): AnalysisFinding {
-  const line = lineAt(file.content, index);
-  return { ...input, id: stableId(file.path, line, input.title), path: file.path, line, score: SEVERITY_WEIGHT[input.severity] };
+function makeFinding(file: SourceFile, index: number, input: Omit<AnalysisFinding, "id" | "path" | "line" | "column" | "score">): AnalysisFinding {
+  const { line, column } = locationAt(file.content, index);
+  return { ...input, id: stableId(file.path, line, column, input.title), path: file.path, line, column, score: SEVERITY_WEIGHT[input.severity] };
+}
+
+type LexicalState = "code" | "single" | "double" | "template" | "line-comment" | "block-comment" | "regex";
+
+function syntaxFindings(file: SourceFile): AnalysisFinding[] {
+  const findings: AnalysisFinding[] = [];
+  const source = file.content;
+  const stack: Array<{ character: "(" | "[" | "{"; index: number }> = [];
+  const closing: Record<string, "(" | "[" | "{"> = { ")": "(", "]": "[", "}": "{" };
+  let state: LexicalState = "code";
+  let stateStart = 0;
+  let escaped = false;
+  let regexClass = false;
+
+  const evidenceAt = (index: number) => source.split("\n")[locationAt(source, index).line - 1]?.trim().slice(0, 180) || source.slice(index, index + 80);
+  const add = (index: number, title: string, explanation: string, suggestion: string) => {
+    findings.push(makeFinding(file, index, {
+      severity: "high", category: "syntax", title, explanation,
+      evidence: evidenceAt(index), suggestion,
+    }));
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (state === "line-comment") {
+      if (character === "\n") state = "code";
+      continue;
+    }
+    if (state === "block-comment") {
+      if (character === "*" && next === "/") { state = "code"; index += 1; }
+      continue;
+    }
+    if (state === "single" || state === "double" || state === "template") {
+      if (escaped) { escaped = false; continue; }
+      if (character === "\\") { escaped = true; continue; }
+      const delimiter = state === "single" ? "'" : state === "double" ? '"' : "`";
+      if (character === delimiter) state = "code";
+      else if (character === "\n" && state !== "template") {
+        add(stateStart, "Unterminated string literal", "A quoted string reaches a newline before its closing delimiter.", "Close the string or use a template literal for multiline text.");
+        state = "code";
+      }
+      continue;
+    }
+    if (state === "regex") {
+      if (escaped) { escaped = false; continue; }
+      if (character === "\\") { escaped = true; continue; }
+      if (character === "[") regexClass = true;
+      else if (character === "]") regexClass = false;
+      else if (character === "/" && !regexClass) {
+        state = "code";
+        while (/[a-z]/i.test(source[index + 1] ?? "")) index += 1;
+      } else if (character === "\n") {
+        add(stateStart, "Unterminated regular expression", "A regular-expression literal reaches a newline before its closing slash.", "Close the expression and verify escaped slashes and character classes.");
+        state = "code";
+      }
+      continue;
+    }
+
+    if (character === "/" && next === "/") { state = "line-comment"; index += 1; continue; }
+    if (character === "/" && next === "*") { state = "block-comment"; stateStart = index; index += 1; continue; }
+    if (character === "'" || character === '"' || character === "`") {
+      state = character === "'" ? "single" : character === '"' ? "double" : "template";
+      stateStart = index;
+      escaped = false;
+      continue;
+    }
+    if (character === "/") {
+      const prefix = source.slice(0, index).trimEnd();
+      const previous = prefix.at(-1) ?? "";
+      const lastWord = prefix.match(/([a-zA-Z_$][\w$]*)$/)?.[1] ?? "";
+      if (!previous || "([=,:;!&|?{}".includes(previous) || /^(return|throw|case|yield)$/.test(lastWord)) {
+        state = "regex"; stateStart = index; regexClass = false; escaped = false; continue;
+      }
+    }
+    if (character === "(" || character === "[" || character === "{") stack.push({ character, index });
+    else if (character in closing) {
+      const expected = closing[character];
+      const opener = stack.at(-1);
+      if (!opener || opener.character !== expected) {
+        add(index, `Unexpected '${character}'`, opener ? `This closing delimiter does not match the open '${opener.character}'.` : "This closing delimiter has no matching opener.", "Remove it or add the matching opening delimiter.");
+      } else stack.pop();
+    }
+  }
+
+  if (state === "block-comment") add(stateStart, "Unterminated block comment", "The comment reaches the end of the file without */.", "Add the closing */ delimiter.");
+  else if (state === "single" || state === "double" || state === "template") add(stateStart, state === "template" ? "Unterminated template literal" : "Unterminated string literal", "The literal reaches the end of the file without a closing delimiter.", "Add the matching closing delimiter.");
+  else if (state === "regex") add(stateStart, "Unterminated regular expression", "The expression reaches the end of the file without a closing slash.", "Add the closing slash and verify escaping.");
+
+  for (const opener of stack.slice(-3).reverse()) {
+    const expected = opener.character === "(" ? ")" : opener.character === "[" ? "]" : "}";
+    add(opener.index, `Unclosed '${opener.character}'`, `This delimiter reaches the end of the file without '${expected}'.`, `Add the matching '${expected}' delimiter.`);
+  }
+
+  const missingExpression = /\b(?:const|let|var)\s+[a-zA-Z_$][\w$]*\s*=\s*(?=;|$)/gm.exec(source);
+  if (missingExpression) add(missingExpression.index, "Missing assignment expression", "A variable declaration has an equals sign but no value.", "Provide an expression after '=' or remove the assignment.");
+  const emptyCondition = /\b(?:if|while|switch)\s*\(\s*\)/g.exec(source);
+  if (emptyCondition) add(emptyCondition.index, "Missing condition expression", "This control-flow statement requires an expression inside its parentheses.", "Add a boolean or switch expression.");
+  const missingArrowBody = /=>\s*(?=;|$)/gm.exec(source);
+  if (missingArrowBody) add(missingArrowBody.index, "Missing arrow-function body", "The arrow is not followed by an expression or block.", "Add an expression or a { ... } body after =>.");
+
+  if (/\.json$/i.test(file.path)) {
+    try { JSON.parse(source); } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Invalid JSON";
+      const position = Number(message.match(/position\s+(\d+)/i)?.[1] ?? 0);
+      add(position, "Invalid JSON syntax", message.replace(/^JSON\.parse:\s*/i, ""), "Remove comments and trailing commas, and ensure every key and string uses double quotes.");
+    }
+  }
+  return findings;
 }
 
 function inspectFile(file: SourceFile): AnalysisFinding[] {
-  const findings: AnalysisFinding[] = [];
+  const findings: AnalysisFinding[] = syntaxFindings(file);
   const rules: Array<{ pattern: RegExp; severity: FindingSeverity; category: FindingCategory; title: string; explanation: string; suggestion: string }> = [
     { pattern: /\beval\s*\(/, severity: "critical", category: "security", title: "Dynamic code execution", explanation: "eval executes data as code and can turn untrusted input into arbitrary execution.", suggestion: "Replace eval with a typed parser or explicit command map." },
     { pattern: /\.innerHTML\s*=/, severity: "high", category: "security", title: "Unsafe HTML assignment", explanation: "Direct HTML assignment can introduce cross-site scripting when content is not strictly trusted.", suggestion: "Render text nodes or sanitize through an application-owned allowlist." },
@@ -256,6 +374,7 @@ export function analyzeRepository(inputFiles: SourceFile[]): RepositoryAnalysis 
       high: ranked.filter((finding) => finding.severity === "high").length,
       dependencyEdges: dependencies.length,
       duplicateBlocks: duplicates.length,
+      syntaxErrors: ranked.filter((finding) => finding.category === "syntax").length,
     },
     findings: ranked,
     hotspots,
@@ -265,6 +384,7 @@ export function analyzeRepository(inputFiles: SourceFile[]): RepositoryAnalysis 
       { name: "Rabin–Karp shingles", complexity: "O(L) expected", purpose: "Find verified duplicate code blocks" },
       { name: "Binary max-heap", complexity: "O(N log N)", purpose: "Rank risk findings and hotspots" },
       { name: "Single-pass rule engine", complexity: "O(B)", purpose: "Detect security, reliability, and performance risks" },
+      { name: "Lexical state machine + stack", complexity: "O(B) time · O(D) space", purpose: "Locate malformed literals, comments, and delimiters" },
     ],
   };
 }

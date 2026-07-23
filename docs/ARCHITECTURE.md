@@ -70,7 +70,7 @@ Budgets:
 
 ## Self-contained repository intelligence
 
-Mesh Intelligence sends repository snapshots only to the application-owned Worker; it does not call a third-party model API. A single-pass rule engine detects security, reliability, and performance risks. Import resolution builds a directed dependency graph, Rabin–Karp-style normalized shingles identify verified duplicate blocks, and binary max-heaps rank findings and file hotspots. Safe mechanical improvements are emitted as exact before/after patches and are rejected if the working file changed after analysis.
+Mesh Intelligence sends repository snapshots only to the application-owned Worker; it does not call a third-party model API. An `O(n)` lexical state machine tracks strings, templates, comments, and regular expressions while a delimiter stack reports malformed syntax at exact line and column locations. JSON files also receive grammar validation. A single-pass rule engine detects security, reliability, and performance risks. Import resolution builds a directed dependency graph, Rabin–Karp-style normalized shingles identify verified duplicate blocks, and binary max-heaps rank findings and file hotspots. Safe mechanical improvements are emitted as exact before/after patches and are rejected if the working file changed after analysis.
 
 Evaluation tracks finding precision, patch-apply rate, test pass rate, reviewer acceptance, regressions, and analysis latency on a versioned repository task set. A future offline open-weight model can augment explanations without replacing the deterministic evidence and patch contracts.
 

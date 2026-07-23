@@ -27,3 +27,26 @@ test("detects verified duplicate blocks without flagging same-file windows", () 
   assert.equal(result.summary.duplicateBlocks, 1);
   assert.ok(result.findings.some((finding) => finding.title === "Duplicate implementation block"));
 });
+
+test("reports unmatched delimiters with an exact line and column", () => {
+  const result = analyzeRepository([{ path: "broken.ts", content: "function broken() {\n  return [1, 2);\n}" }]);
+  const finding = result.findings.find((item) => item.category === "syntax" && item.title.includes("Unexpected"));
+  assert.equal(finding?.line, 2);
+  assert.equal(finding?.column, 15);
+  assert.ok(result.summary.syntaxErrors >= 1);
+});
+
+test("ignores delimiters inside strings, comments, and regular expressions", () => {
+  const source = "const text = '{]';\n// }}}\nconst pattern = /[{}()]/;\nexport { text, pattern };";
+  const result = analyzeRepository([{ path: "valid.ts", content: source }]);
+  assert.equal(result.findings.filter((finding) => finding.category === "syntax").length, 0);
+});
+
+test("catches unterminated literals, missing expressions, and invalid JSON", () => {
+  const stringResult = analyzeRepository([{ path: "string.ts", content: "const value = 'broken\nexport { value };" }]);
+  assert.ok(stringResult.findings.some((finding) => finding.title === "Unterminated string literal"));
+  const expressionResult = analyzeRepository([{ path: "expression.ts", content: "const count = ;" }]);
+  assert.ok(expressionResult.findings.some((finding) => finding.title === "Missing assignment expression"));
+  const jsonResult = analyzeRepository([{ path: "config.json", content: '{"strict": true,}' }]);
+  assert.ok(jsonResult.findings.some((finding) => finding.title === "Invalid JSON syntax"));
+});
