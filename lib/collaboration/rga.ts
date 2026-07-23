@@ -35,7 +35,10 @@ function insertSorted(values: string[], value: string): void {
   let high = values.length;
   while (low < high) {
     const middle = (low + high) >>> 1;
-    if (values[middle] < value) low = middle + 1;
+    // Newer Lamport-style IDs sort before older siblings. In an RGA traversal,
+    // that places a local insertion at the cursor instead of after the older
+    // sibling's entire descendant chain.
+    if (values[middle] > value) low = middle + 1;
     else high = middle;
   }
   if (values[low] !== value) values.splice(low, 0, value);
@@ -111,20 +114,22 @@ export class ReplicatedText {
 
   edit(before: string, after: string, clientId: string, nextSequence: () => number): TextOperation[] {
     if (before === after) return [];
+    const beforeValues = Array.from(before);
+    const afterValues = Array.from(after);
     let prefix = 0;
-    const prefixLimit = Math.min(before.length, after.length);
-    while (prefix < prefixLimit && before[prefix] === after[prefix]) prefix += 1;
+    const prefixLimit = Math.min(beforeValues.length, afterValues.length);
+    while (prefix < prefixLimit && beforeValues[prefix] === afterValues[prefix]) prefix += 1;
 
     let suffix = 0;
     while (
-      suffix < before.length - prefix &&
-      suffix < after.length - prefix &&
-      before[before.length - suffix - 1] === after[after.length - suffix - 1]
+      suffix < beforeValues.length - prefix &&
+      suffix < afterValues.length - prefix &&
+      beforeValues[beforeValues.length - suffix - 1] === afterValues[afterValues.length - suffix - 1]
     ) suffix += 1;
 
     const visibleBefore = this.visibleIds();
     const operations: TextOperation[] = [];
-    const deleteEnd = before.length - suffix;
+    const deleteEnd = beforeValues.length - suffix;
     for (const id of visibleBefore.slice(prefix, deleteEnd)) {
       const operation: DeleteOperation = { type: "delete", id };
       this.apply(operation);
@@ -132,8 +137,8 @@ export class ReplicatedText {
     }
 
     let parentId = prefix === 0 ? ROOT_ID : visibleBefore[prefix - 1];
-    const inserted = after.slice(prefix, after.length - suffix);
-    for (const value of Array.from(inserted)) {
+    const inserted = afterValues.slice(prefix, afterValues.length - suffix);
+    for (const value of inserted) {
       const operation: InsertOperation = {
         type: "insert",
         id: `${clientId}:${String(nextSequence()).padStart(12, "0")}`,

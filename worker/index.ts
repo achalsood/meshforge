@@ -23,6 +23,8 @@ import {
   respondToInvitation, updateRepositoryMember,
 } from "../lib/server/identity-store";
 import { persistAudioSignal, persistRoomEvents, replayAudioSignals, replayRoom } from "../lib/server/room-store";
+import { DomainError } from "../lib/server/errors";
+import { readJson } from "../lib/server/http";
 
 interface Env {
   ASSETS: Fetcher;
@@ -44,12 +46,13 @@ interface ExecutionContext {
 const liveRooms = new Map<string, Set<WebSocket>>();
 
 function errorResponse(cause: unknown, fallback: string): Response {
-  const message = cause instanceof Error ? cause.message : fallback;
-  const status = cause instanceof AccessError ? cause.status
-    : message.includes("not found") ? 404
-      : message.includes("moved") || message.includes("rebase") || message.includes("exists") ? 409
-        : 400;
-  return Response.json({ error: message }, { status });
+  if (cause instanceof AccessError || cause instanceof DomainError) {
+    return Response.json({ error: cause.message }, { status: cause.status });
+  }
+  if (cause instanceof SyntaxError) {
+    return Response.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  return Response.json({ error: fallback }, { status: 500 });
 }
 
 function repositoryCoordinates(request: Request): { owner: string; name: string } {
@@ -155,7 +158,7 @@ async function handleRoomEvents(request: Request, env: Env, roomId: string, user
     });
   }
   if (request.method === "POST") {
-    const body = await request.json() as { events?: RealtimeBatch["events"] };
+    const body = await readJson<{ events?: RealtimeBatch["events"] }>(request, 300_000);
     if (!Array.isArray(body.events) || body.events.length > 100) {
       return Response.json({ error: "Expected at most 100 events" }, { status: 400 });
     }
@@ -178,10 +181,7 @@ async function handleAudioSignals(request: Request, env: Env, roomId: string, us
     });
   }
   if (request.method === "POST") {
-    const raw = await request.text();
-    if (raw.length > 128_000) return Response.json({ error: "Signal is too large" }, { status: 413 });
-    let packet: unknown;
-    try { packet = JSON.parse(raw); } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
+    const packet = await readJson<unknown>(request, 128_000);
     if (!isRealtimeSignalPacket(packet, roomId)) return Response.json({ error: "Invalid signal" }, { status: 400 });
     const seq = await persistAudioSignal(env.DB, roomId, packet);
     return Response.json({ accepted: true, seq }, { status: 202 });
@@ -200,9 +200,7 @@ async function handleRepository(request: Request, env: Env, owner: string, name:
     }
     if (request.method === "POST" && commitRoute) {
       await requireRepositoryPermission(env.DB, owner, name, user, "commit");
-      const raw = await request.text();
-      if (raw.length > 2_200_000) return Response.json({ error: "Commit payload is too large" }, { status: 413 });
-      const input = JSON.parse(raw) as Parameters<typeof commitRepository>[3];
+      const input = await readJson<Parameters<typeof commitRepository>[3]>(request, 2_200_000);
       return Response.json(await commitRepository(env.DB, owner, name, { ...input, author: user.displayName }), { status: 201 });
     }
     return new Response("Method not allowed", { status: 405, headers: { Allow: commitRoute ? "POST" : "GET" } });
@@ -215,7 +213,7 @@ async function handleRepositoryBranches(request: Request, env: Env, owner: strin
   try {
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
     await requireRepositoryPermission(env.DB, owner, name, user, "branch");
-    const input = await request.json() as Parameters<typeof createRepositoryBranch>[3];
+    const input = await readJson<Parameters<typeof createRepositoryBranch>[3]>(request);
     return Response.json(await createRepositoryBranch(env.DB, owner, name, input), { status: 201 });
   } catch (cause) {
     return errorResponse(cause, "Branch request failed");
@@ -230,7 +228,7 @@ async function handlePullRequests(request: Request, env: Env, owner: string, nam
     }
     if (request.method === "POST" && !number) {
       await requireRepositoryPermission(env.DB, owner, name, user, "pull_request");
-      const input = await request.json() as Parameters<typeof createRepositoryPullRequest>[3];
+      const input = await readJson<Parameters<typeof createRepositoryPullRequest>[3]>(request);
       return Response.json(await createRepositoryPullRequest(env.DB, owner, name, { ...input, author: user.displayName }), { status: 201 });
     }
     if (request.method === "POST" && number && merge) {
@@ -251,17 +249,17 @@ async function handleIssues(request: Request, env: Env, owner: string, name: str
     }
     if (request.method === "POST" && !number) {
       await requireRepositoryPermission(env.DB, owner, name, user, "issues");
-      const input = await request.json() as Parameters<typeof createRepositoryIssue>[3];
+      const input = await readJson<Parameters<typeof createRepositoryIssue>[3]>(request);
       return Response.json(await createRepositoryIssue(env.DB, owner, name, { ...input, author: user.displayName }), { status: 201 });
     }
     if (request.method === "PATCH" && number && !comments) {
       await requireRepositoryPermission(env.DB, owner, name, user, "issues");
-      const input = await request.json() as Parameters<typeof updateRepositoryIssue>[4];
+      const input = await readJson<Parameters<typeof updateRepositoryIssue>[4]>(request);
       return Response.json(await updateRepositoryIssue(env.DB, owner, name, number, input));
     }
     if (request.method === "POST" && number && comments) {
       await requireRepositoryPermission(env.DB, owner, name, user, "issues");
-      const input = await request.json() as Parameters<typeof addRepositoryIssueComment>[4];
+      const input = await readJson<Parameters<typeof addRepositoryIssueComment>[4]>(request);
       return Response.json(await addRepositoryIssueComment(env.DB, owner, name, number, { ...input, author: user.displayName }), { status: 201 });
     }
     return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST, PATCH" } });
@@ -278,7 +276,7 @@ async function handleActions(request: Request, env: Env, owner: string, name: st
     }
     if (request.method === "POST") {
       await requireRepositoryPermission(env.DB, owner, name, user, "actions");
-      const input = await request.json() as Parameters<typeof runRepositoryWorkflow>[3];
+      const input = await readJson<Parameters<typeof runRepositoryWorkflow>[3]>(request);
       return Response.json(await runRepositoryWorkflow(env.DB, owner, name, { ...input, author: user.displayName }), { status: 201 });
     }
     return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
@@ -298,7 +296,7 @@ async function handleRepositories(request: Request, env: Env, user: Authenticate
   try {
     if (request.method === "GET") return handleSession(request, env, user);
     if (request.method === "POST") {
-      const input = await request.json() as { name?: string };
+      const input = await readJson<{ name?: string }>(request);
       return Response.json(await createUserRepository(env.DB, user, input), { status: 201 });
     }
     return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
@@ -310,7 +308,7 @@ async function handleRepositories(request: Request, env: Env, user: Authenticate
 async function handleInvitationResponse(request: Request, env: Env, user: AuthenticatedUser, invitationId: number): Promise<Response> {
   try {
     if (request.method !== "PATCH") return new Response("Method not allowed", { status: 405, headers: { Allow: "PATCH" } });
-    const input = await request.json() as { accept?: boolean };
+    const input = await readJson<{ accept?: boolean }>(request);
     return Response.json(await respondToInvitation(env.DB, user, invitationId, input.accept === true));
   } catch (cause) {
     return errorResponse(cause, "Invitation could not be updated");
@@ -328,11 +326,11 @@ async function handleRepositoryTeam(
   try {
     if (request.method === "GET" && !memberId) return Response.json(await getRepositoryTeam(env.DB, owner, name, user));
     if (request.method === "POST" && !memberId) {
-      const input = await request.json() as Parameters<typeof inviteRepositoryMember>[4];
+      const input = await readJson<Parameters<typeof inviteRepositoryMember>[4]>(request);
       return Response.json(await inviteRepositoryMember(env.DB, owner, name, user, input), { status: 201 });
     }
     if (request.method === "PATCH" && memberId) {
-      const input = await request.json() as { role?: "maintainer" | "contributor" | "viewer" };
+      const input = await readJson<{ role?: "maintainer" | "contributor" | "viewer" }>(request);
       if (!input.role) return Response.json({ error: "A repository role is required" }, { status: 400 });
       return Response.json(await updateRepositoryMember(env.DB, owner, name, user, memberId, input.role));
     }
@@ -347,19 +345,17 @@ async function handleRepositoryTeam(
 
 async function handleRepositoryAnalysis(request: Request, env: Env, user: AuthenticatedUser): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { Allow: "POST" } });
-  const raw = await request.text();
-  if (raw.length > 2_200_000) return Response.json({ error: "Analysis payload is too large" }, { status: 413 });
   try {
     const { owner, name } = repositoryCoordinates(request);
     await requireRepositoryPermission(env.DB, owner, name, user, "read");
-    const input = JSON.parse(raw) as { files?: Array<{ path?: string; content?: string }> };
+    const input = await readJson<{ files?: Array<{ path?: string; content?: string }> }>(request, 2_200_000);
     if (!Array.isArray(input.files) || !input.files.length || input.files.length > 200) {
       return Response.json({ error: "Expected 1–200 repository files" }, { status: 400 });
     }
     const files = input.files.map((file) => ({ path: String(file.path ?? "").slice(0, 240), content: String(file.content ?? "") }));
     return Response.json(analyzeRepository(files), { headers: { "Cache-Control": "no-store" } });
-  } catch {
-    return Response.json({ error: "Invalid analysis request" }, { status: 400 });
+  } catch (cause) {
+    return errorResponse(cause, "Repository analysis failed");
   }
 }
 

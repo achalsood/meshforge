@@ -19,6 +19,7 @@ if [[ ! -x "${vinext}" ]]; then
 fi
 
 echo "Running bounded vinext build..."
+"${SITES_PROJECT_ROOT}/node_modules/.bin/tsc" --noEmit
 timeout \
   --signal=TERM \
   --kill-after="${SITES_BUILD_KILL_AFTER:-10s}" \

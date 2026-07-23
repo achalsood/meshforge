@@ -74,6 +74,18 @@ test("compacts deleted payloads without removing causal anchors", () => {
   const delayed = { type: "insert", id: "peer:0003", parentId: "peer:0001", value: "c" };
   compacted.apply(delayed);
   reference.apply(delayed);
-  assert.equal(compacted.toString(), "bc");
   assert.equal(compacted.toString(), reference.toString());
+});
+
+test("edits Unicode code points without splitting surrogate pairs", () => {
+  const document = ReplicatedText.fromText("A😀B");
+  let sequence = 0;
+  const operations = document.edit("A😀B", "A🚀B", "unicode", () => ++sequence);
+
+  assert.equal(document.toString(), "A🚀B");
+  assert.equal(operations.filter((operation) => operation.type === "delete").length, 1);
+  assert.deepEqual(
+    operations.filter((operation) => operation.type === "insert").map((operation) => operation.value),
+    ["🚀"],
+  );
 });

@@ -6,6 +6,7 @@ import type {
   FileDiff, IssueComment, PullRequest, RepositoryBranch, RepositoryCommit, RepositoryFile,
   RepositoryIssue, RepositorySnapshot, WorkflowRun, WorkflowStep,
 } from "../repository/types";
+import { DomainError } from "./errors";
 
 const INITIAL_FILES = [
   {
@@ -255,7 +256,7 @@ function calculateDiffs(beforeFiles: RepositoryFile[], afterFiles: Array<{ path:
 async function createSnapshotCommit(db: D1Database, repository: RepositoryRow, branch: string, author: string, message: string, inputFiles: Array<{ path: string; content: string }>, secondParentOid: string | null = null, expectedHeadOid?: string): Promise<string> {
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
-  if (expectedHeadOid && head?.commit_oid !== expectedHeadOid) throw new Error("Base branch moved; rebase before merging");
+  if (expectedHeadOid && head?.commit_oid !== expectedHeadOid) throw new DomainError("Base branch moved; rebase before merging", 409);
   const previousFiles = await filesAtCommit(db, head?.commit_oid ?? null);
   const normalized = [...inputFiles]
     .map((file) => ({ path: file.path.replace(/^\/+/, "").slice(0, 240), content: file.content }))
@@ -298,10 +299,20 @@ async function createSnapshotCommit(db: D1Database, repository: RepositoryRow, b
       VALUES (?, ?, ?, ?, ?) ON CONFLICT(commit_oid, path) DO NOTHING`)
       .bind(commitOid, diff.path, diff.status, diff.insertions, diff.deletions));
   }
-  statements.push(db.prepare(`INSERT INTO repo_refs (repository_id, name, commit_oid, updated_at)
-    VALUES (?, ?, ?, ?) ON CONFLICT(repository_id, name) DO UPDATE SET commit_oid = excluded.commit_oid, updated_at = excluded.updated_at`)
-    .bind(repository.id, branch, commitOid, now));
-  await db.batch(statements);
+  if (head) {
+    statements.push(db.prepare(`UPDATE repo_refs SET commit_oid = ?, updated_at = ?
+      WHERE repository_id = ? AND name = ? AND commit_oid = ?`)
+      .bind(commitOid, now, repository.id, branch, head.commit_oid));
+  } else {
+    statements.push(db.prepare(`INSERT INTO repo_refs (repository_id, name, commit_oid, updated_at)
+      VALUES (?, ?, ?, ?) ON CONFLICT(repository_id, name) DO NOTHING`)
+      .bind(repository.id, branch, commitOid, now));
+  }
+  const results = await db.batch(statements);
+  const refUpdate = results.at(-1);
+  if (Number(refUpdate?.meta.changes ?? 0) !== 1) {
+    throw new DomainError("Branch moved; reload before committing", 409);
+  }
   return commitOid;
 }
 
@@ -314,7 +325,7 @@ async function ensureSeedRepository(db: D1Database, owner: string, name: string)
   if (!repository) throw new Error("Repository could not be initialized");
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = 'main'")
     .bind(repository.id).first<HeadRow>();
-  if (!head) await createSnapshotCommit(db, repository, "MeshForge", "Initial repository snapshot", INITIAL_FILES);
+  if (!head) await createSnapshotCommit(db, repository, "main", "MeshForge", "Initial repository snapshot", INITIAL_FILES);
   return repository;
 }
 
@@ -398,7 +409,7 @@ export async function getRepositorySnapshot(db: D1Database, owner: string, name:
   const repository = await ensureSeedRepository(db, owner, name);
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
-  if (!head) throw new Error("Branch not found");
+  if (!head) throw new DomainError("Branch not found", 404);
   const files = await filesAtCommit(db, head.commit_oid);
   const history = await loadHistory(db, repository.id);
   const branches = await loadBranches(db, repository);
@@ -430,7 +441,7 @@ export async function getRepositorySnapshot(db: D1Database, owner: string, name:
 
 function branchName(value: string): string {
   const normalized = value.trim().replace(/[^a-zA-Z0-9._/-]/g, "-").replace(/-{2,}/g, "-").replace(/^[-/.]+|[-/.]+$/g, "").slice(0, 120);
-  if (!normalized) throw new Error("Branch name is required");
+  if (!normalized) throw new DomainError("Branch name is required");
   return normalized;
 }
 
@@ -442,11 +453,11 @@ export async function createRepositoryBranch(db: D1Database, owner: string, name
   const sourceName = branchName(input.fromBranch || repository.default_branch);
   const source = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, sourceName).first<HeadRow>();
-  if (!source) throw new Error("Source branch not found");
-  if (input.expectedHeadOid && input.expectedHeadOid !== source.commit_oid) throw new Error("Source branch moved; reload before branching");
+  if (!source) throw new DomainError("Source branch not found", 404);
+  if (input.expectedHeadOid && input.expectedHeadOid !== source.commit_oid) throw new DomainError("Source branch moved; reload before branching", 409);
   const existing = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, nextName).first<HeadRow>();
-  if (existing) throw new Error("Branch already exists");
+  if (existing) throw new DomainError("Branch already exists", 409);
   await db.prepare("INSERT INTO repo_refs (repository_id, name, commit_oid, updated_at) VALUES (?, ?, ?, ?)")
     .bind(repository.id, nextName, source.commit_oid, Date.now()).run();
   return getRepositorySnapshot(db, owner, name, nextName);
@@ -458,16 +469,16 @@ export async function createRepositoryPullRequest(db: D1Database, owner: string,
   const repository = await ensureSeedRepository(db, owner, name);
   const headBranch = branchName(input.headBranch ?? "");
   const baseBranch = branchName(input.baseBranch || repository.default_branch);
-  if (headBranch === baseBranch) throw new Error("Pull request branches must be different");
+  if (headBranch === baseBranch) throw new DomainError("Pull request branches must be different");
   const [head, base, duplicate, numberRow] = await Promise.all([
     db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, headBranch).first<HeadRow>(),
     db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, baseBranch).first<HeadRow>(),
     db.prepare("SELECT number FROM repo_pull_requests WHERE repository_id = ? AND head_branch = ? AND base_branch = ? AND status = 'open'").bind(repository.id, headBranch, baseBranch).first<{ number: number }>(),
     db.prepare("SELECT COALESCE(MAX(number), 0) + 1 next_number FROM repo_pull_requests WHERE repository_id = ?").bind(repository.id).first<{ next_number: number }>(),
   ]);
-  if (!head || !base) throw new Error("Pull request branch not found");
-  if (head.commit_oid === base.commit_oid) throw new Error("Branches do not contain different commits");
-  if (duplicate) throw new Error(`Pull request #${duplicate.number} is already open`);
+  if (!head || !base) throw new DomainError("Pull request branch not found", 404);
+  if (head.commit_oid === base.commit_oid) throw new DomainError("Branches do not contain different commits");
+  if (duplicate) throw new DomainError(`Pull request #${duplicate.number} is already open`, 409);
   const now = Date.now();
   await db.prepare(`INSERT INTO repo_pull_requests
     (repository_id, number, title, body, head_branch, base_branch, head_oid, base_oid, status, author, created_at, updated_at)
@@ -483,14 +494,14 @@ export async function mergeRepositoryPullRequest(db: D1Database, owner: string, 
     FROM repo_pull_requests WHERE repository_id = ? AND number = ?`).bind(repository.id, number).first<{
       number: number; title: string; head_branch: string; base_branch: string; head_oid: string; base_oid: string; status: string;
     }>();
-  if (!pull) throw new Error("Pull request not found");
-  if (pull.status !== "open") throw new Error("Pull request is not open");
+  if (!pull) throw new DomainError("Pull request not found", 404);
+  if (pull.status !== "open") throw new DomainError("Pull request is not open", 409);
   const [head, base] = await Promise.all([
     db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, pull.head_branch).first<HeadRow>(),
     db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?").bind(repository.id, pull.base_branch).first<HeadRow>(),
   ]);
-  if (!head || !base) throw new Error("Pull request branch no longer exists");
-  if (base.commit_oid !== pull.base_oid) throw new Error("Base branch moved; rebase before merging");
+  if (!head || !base) throw new DomainError("Pull request branch no longer exists", 404);
+  if (base.commit_oid !== pull.base_oid) throw new DomainError("Base branch moved; rebase before merging", 409);
   const headFiles = await filesAtCommit(db, head.commit_oid);
   const mergeOid = await createSnapshotCommit(db, repository, pull.base_branch, author, `Merge pull request #${number}: ${pull.title}`, headFiles, head.commit_oid, pull.base_oid);
   const now = Date.now();
@@ -507,11 +518,11 @@ export async function commitRepository(db: D1Database, owner: string, name: stri
   const repository = await ensureSeedRepository(db, owner, name);
   const branch = (input.branch || repository.default_branch).replace(/[^a-zA-Z0-9._/-]/g, "").slice(0, 120);
   const files = (input.files ?? []).map((file) => ({ path: String(file.path ?? ""), content: String(file.content ?? "") }));
-  if (!files.length || files.length > 100) throw new Error("A commit requires 1–100 files");
-  if (files.reduce((sum, file) => sum + utf8Bytes(file.content), 0) > 2_000_000) throw new Error("Commit exceeds the 2 MB milestone limit");
+  if (!files.length || files.length > 100) throw new DomainError("A commit requires 1–100 files");
+  if (files.reduce((sum, file) => sum + utf8Bytes(file.content), 0) > 2_000_000) throw new DomainError("Commit exceeds the 2 MB milestone limit", 413);
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
-  if (input.expectedHeadOid && head?.commit_oid !== input.expectedHeadOid) throw new Error("Branch moved; reload before committing");
+  if (input.expectedHeadOid && head?.commit_oid !== input.expectedHeadOid) throw new DomainError("Branch moved; reload before committing", 409);
   const author = input.author || "MeshForge user";
   const commitOid = await createSnapshotCommit(db, repository, branch, author, input.message?.trim() || "Update collaborative workspace", files);
   await createWorkflowRun(db, repository, branch, commitOid, author, "push", files);
@@ -565,7 +576,7 @@ export async function createRepositoryIssue(db: D1Database, owner: string, name:
 }): Promise<RepositoryIssue[]> {
   const repository = await ensureSeedRepository(db, owner, name);
   const title = input.title?.trim();
-  if (!title) throw new Error("Issue title is required");
+  if (!title) throw new DomainError("Issue title is required");
   const numberRow = await db.prepare("SELECT COALESCE(MAX(number), 0) + 1 next_number FROM repo_issues WHERE repository_id = ?")
     .bind(repository.id).first<{ next_number: number }>();
   const now = Date.now();
@@ -584,7 +595,7 @@ export async function updateRepositoryIssue(db: D1Database, owner: string, name:
   const repository = await ensureSeedRepository(db, owner, name);
   const issue = await db.prepare("SELECT number, status, assignee, labels FROM repo_issues WHERE repository_id = ? AND number = ?")
     .bind(repository.id, number).first<{ number: number; status: "open" | "closed"; assignee: string | null; labels: string }>();
-  if (!issue) throw new Error("Issue not found");
+  if (!issue) throw new DomainError("Issue not found", 404);
   const status = input.status === "closed" ? "closed" : input.status === "open" ? "open" : issue.status;
   const now = Date.now();
   await db.prepare(`UPDATE repo_issues SET status = ?, assignee = ?, labels = ?, updated_at = ?, closed_at = ?
@@ -601,9 +612,9 @@ export async function addRepositoryIssueComment(db: D1Database, owner: string, n
   const repository = await ensureSeedRepository(db, owner, name);
   const issue = await db.prepare("SELECT number FROM repo_issues WHERE repository_id = ? AND number = ?")
     .bind(repository.id, number).first<{ number: number }>();
-  if (!issue) throw new Error("Issue not found");
+  if (!issue) throw new DomainError("Issue not found", 404);
   const body = input.body?.trim();
-  if (!body) throw new Error("Comment cannot be empty");
+  if (!body) throw new DomainError("Comment cannot be empty");
   const now = Date.now();
   await db.batch([
     db.prepare(`INSERT INTO repo_issue_comments (repository_id, issue_number, author, body, created_at)
@@ -668,7 +679,7 @@ export async function runRepositoryWorkflow(db: D1Database, owner: string, name:
   const branch = branchName(input.branch || repository.default_branch);
   const head = await db.prepare("SELECT commit_oid FROM repo_refs WHERE repository_id = ? AND name = ?")
     .bind(repository.id, branch).first<HeadRow>();
-  if (!head) throw new Error("Branch not found");
+  if (!head) throw new DomainError("Branch not found", 404);
   await createWorkflowRun(db, repository, branch, head.commit_oid, input.author || "MeshForge user", "manual");
   return listRepositoryWorkflowRuns(db, owner, name);
 }

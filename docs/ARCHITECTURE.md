@@ -53,7 +53,7 @@ Presence is ephemeral and uses a hash map keyed by connection ID plus a min-heap
 5. Peers apply missing operations, translate them to editor ranges, and acknowledge the latest contiguous sequence.
 6. The coordinator compacts tombstones after every active replica has crossed the safe version boundary.
 
-The current deployment implements steps 1–5. WebSockets are the low-latency fast path. A D1 event log is the source for reconnect replay and periodic reconciliation, so a socket reconnect or isolate change cannot silently lose acknowledged state. Presence is held separately with a 15-second lease. Safe tombstone compaction remains the next protocol milestone.
+The current deployment implements steps 1–5 plus causal-safe payload compaction: deleted character contents are released while IDs and parent links remain as anchors for delayed operations. WebSockets are the low-latency fast path. A D1 event log is the source for reconnect replay and periodic reconciliation, so a socket reconnect or isolate change cannot silently lose acknowledged state. Presence is held separately with a 15-second lease. Stable-frontier snapshots and structural tombstone removal remain the next protocol milestone.
 
 ## Audio path
 

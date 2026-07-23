@@ -30,6 +30,7 @@ MeshForge is intentionally designed to demonstrate three different engineering p
 - Voice-room controls and speaking state
 - Working room chat composer
 - Peer-to-peer WebRTC audio with short-lived room signaling, explicit microphone opt-in, mute/leave controls, and active-speaker metering
+- Per-device microphone and speaker selection with graceful browser capability fallbacks
 - Self-contained Mesh Intelligence review with stack-based syntax preflight, exact error locations, dependency graphs, complexity hotspots, security/performance rules, duplicate-code detection, and deterministic patches
 - Durable repository issues with labels, comments, filters, and open/closed lifecycle controls
 - Self-hosted Mesh CI actions with push/manual triggers, syntax quality gates, test discovery, step logs, and persistent run history
@@ -58,14 +59,14 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for component boundaries, dat
 
 `lib/collaboration/indexed-treap.ts` implements an order-statistic treap—the local sequence index beneath the planned CRDT layer. Every node maintains subtree size, allowing position lookup, insertion, removal, split, and merge in expected `O(log n)` time. The deterministic priority function makes replicas reproducible in tests.
 
-This structure avoids repeatedly scanning the entire document when translating between editor offsets and replicated operations. Future milestones layer stable CRDT identifiers and tombstone compaction over the same index.
+This structure avoids repeatedly scanning the entire document when translating between editor offsets and replicated operations. The collaboration layer adds stable CRDT identifiers and causal-safe tombstone payload compaction over the same indexing approach.
 
 ## Product roadmap
 
 1. **Experience prototype** — current interactive workspace.
 2. **Realtime text** — implemented: versioned binary operation encoding, binary WebSocket frames, JSON-compatible durable replay, causal-safe tombstone payload compaction, sequence CRDT, live presence, reconnect backoff, polling recovery, malformed-frame checks, and shuffled-delivery convergence tests. Next: room epochs, stable-frontier snapshots, and large-document chunking.
 3. **Source management** — implemented multiple repositories, authenticated authorship, owner/maintainer/contributor/viewer RBAC, repository invitations, content-addressed snapshots, branch creation/switching, commits, pull requests, two-parent merge commits, diffs, durable issues, and stale-base protection. Next: conflict-aware rebasing and inline review comments.
-4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio and resilient short-lived HTTP signaling. Next: TURN relay, device selection, moderation, and SFU migration for larger rooms.
+4. **Voice and chat** — implemented peer-to-peer WebRTC mesh audio, resilient short-lived HTTP signaling, and microphone/speaker selection. Next: TURN relay, moderation, and SFU migration for larger rooms.
 5. **Repository intelligence** — implemented local dependency analysis, risk ranking, rolling-hash duplicate detection, complexity hotspots, and deterministic patch generation with no external API dependency. Next: language-aware parsers, test-impact analysis, and an offline open-weight model option.
 6. **Automation** — implemented self-hosted Mesh CI runs on commits, merges, and manual dispatch. The deterministic workflow records checkout validation, syntax preflight, test discovery, repository intelligence, timing, logs, and pass/fail state in D1. Next: repository-defined workflow files, isolated command execution, and dependency-aware test selection.
 7. **Scale proof** — load tests, flamegraphs, SLO dashboard, chaos tests, and a public engineering write-up.
@@ -85,7 +86,8 @@ Then open the local address printed by the development server.
 
 ```bash
 npm run lint
+npm run typecheck
 npm test
 ```
 
-The production build emits a Cloudflare-compatible worker artifact. Text operations use compact binary frames on live WebSockets and a versioned base64 envelope in the durable event log; legacy JSON operation payloads remain readable during rollout. Deleted character payloads are compacted after an idle window while their RGA anchors remain available for late-arriving children. Chat and presence retain their readable JSON protocol. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. SDP/ICE signaling records expire after 60 seconds and audio media is never stored or relayed through the application server. A TURN service is still required for reliable connectivity across restrictive enterprise networks.
+Pull requests and pushes to `main` run the same lint, type-check, test, and production-build gates in GitHub Actions. The production build emits a Cloudflare-compatible worker artifact. Text operations use compact binary frames on live WebSockets and a versioned base64 envelope in the durable event log; legacy JSON operation payloads remain readable during rollout. Deleted character payloads are compacted after an idle window while their RGA anchors remain available for late-arriving children. Chat and presence retain their readable JSON protocol. Audio uses direct peer-to-peer WebRTC after explicit microphone permission. SDP/ICE signaling records expire after 60 seconds and audio media is never stored or relayed through the application server. A TURN service is still required for reliable connectivity across restrictive enterprise networks.

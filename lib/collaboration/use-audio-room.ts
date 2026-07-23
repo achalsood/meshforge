@@ -160,7 +160,6 @@ export function useAudioRoom(roomId: string, selfId: string, presence: PresenceR
       if (!audio) {
         audio = document.createElement("audio");
         audio.autoplay = true;
-        audio.playsInline = true;
         audio.dataset.meshforgePeer = peerId;
         audio.hidden = true;
         document.body.appendChild(audio);

@@ -24,7 +24,17 @@ test("routes targeted and broadcast signaling without echoing to sender", () => 
 test("validates room-scoped HTTP signaling packets", () => {
   const ready = { type: "signal", roomId: "room", clientId: "peer-a", signal: { kind: "ready" } };
   assert.equal(isRealtimeSignalPacket(ready, "room"), true);
+  assert.equal(isRealtimeSignalPacket({
+    ...ready,
+    signal: { kind: "description", description: { type: "offer", sdp: "v=0" } },
+  }, "room"), true);
+  assert.equal(isRealtimeSignalPacket({
+    ...ready,
+    signal: { kind: "candidate", candidate: { candidate: "candidate:1", sdpMid: "0", sdpMLineIndex: 0 } },
+  }, "room"), true);
   assert.equal(isRealtimeSignalPacket({ ...ready, roomId: "another-room" }, "room"), false);
   assert.equal(isRealtimeSignalPacket({ ...ready, clientId: "" }, "room"), false);
   assert.equal(isRealtimeSignalPacket({ ...ready, signal: { kind: "unknown" } }, "room"), false);
+  assert.equal(isRealtimeSignalPacket({ ...ready, signal: { kind: "description", description: { type: "offer" } } }, "room"), false);
+  assert.equal(isRealtimeSignalPacket({ ...ready, signal: { kind: "candidate", candidate: { candidate: 123 } } }, "room"), false);
 });
