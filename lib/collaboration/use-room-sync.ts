@@ -237,6 +237,12 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       setLatency(Math.max(1, Math.round(performance.now() - started)));
     };
 
+    const markReplayFailure = () => {
+      if (socket.current?.readyState !== WebSocket.OPEN) {
+        setStatus("recovering");
+      }
+    };
+
     const connect = () => {
       if (cancelled || !enabled) return;
       setStatus(reconnectAttempt.current ? "recovering" : "connecting");
@@ -259,7 +265,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
         setStatus("live");
         heartbeat();
         requestSync();
-        void replay();
+        void replay().catch(markReplayFailure);
       });
       ws.addEventListener("message", (message) => {
         try {
@@ -308,9 +314,9 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       });
       return () => { cancelled = true; };
     }
-    void replay().catch(() => setStatus("recovering"));
+    void replay().catch(markReplayFailure);
     connect();
-    const replayTimer = setInterval(() => void replay().catch(() => setStatus("recovering")), 1_500);
+    const replayTimer = setInterval(() => void replay().catch(markReplayFailure), 1_500);
     const heartbeatTimer = setInterval(heartbeat, 5_000);
     return () => {
       cancelled = true;
