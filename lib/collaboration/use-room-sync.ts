@@ -59,6 +59,12 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const socket = useRef<WebSocket | null>(null);
   const reconnectAttempt = useRef(0);
   const seenEvents = useRef(new Set<string>());
+  const persistenceQueue = useRef<Array<{
+    key: string;
+    events: RoomEvent[];
+    post: (events: RoomEvent[]) => Promise<void>;
+  }>>([]);
+  const persistenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selection = useRef({ from: 0, to: 0 });
   const compactionDebt = useRef(0);
   const compactionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -88,9 +94,9 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     let processedOperations = 0;
     const incomingChats: SyncedChat[] = [];
     for (const event of events) {
+      if (event.seq) latestSeq.current = Math.max(latestSeq.current, event.seq);
       if (seenEvents.current.has(event.eventId)) continue;
       seenEvents.current.add(event.eventId);
-      if (event.seq) latestSeq.current = Math.max(latestSeq.current, event.seq);
       if (event.kind === "operations") {
         const operations = operationsFromPayload(event.payload);
         if (!operations) continue;
@@ -118,6 +124,30 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     setLatency(Math.max(1, Math.round(performance.now() - started)));
   }, [repositoryQuery, roomId]);
 
+  const queuePersistence = useCallback((events: RoomEvent[]) => {
+    const key = `${roomId}?${repositoryQuery}`;
+    const tail = persistenceQueue.current.at(-1);
+    if (tail?.key === key && tail.events.length + events.length <= 100) tail.events.push(...events);
+    else persistenceQueue.current.push({ key, events: [...events], post: postFallback });
+    if (persistenceTimer.current) return;
+
+    const drain = async () => {
+      const batch = persistenceQueue.current.shift();
+      if (!batch) {
+        persistenceTimer.current = null;
+        return;
+      }
+      try {
+        await batch.post(batch.events);
+      } catch {
+        setStatus("offline");
+      }
+      persistenceTimer.current = setTimeout(() => void drain(), persistenceQueue.current.length ? 0 : 40);
+    };
+
+    persistenceTimer.current = setTimeout(() => void drain(), 40);
+  }, [postFallback, repositoryQuery, roomId]);
+
   const sendEvents = useCallback((events: RoomEvent[]) => {
     if (!enabled) return;
     const batch: RealtimeBatch = { type: "batch", roomId, clientId: clientId.current, events };
@@ -125,8 +155,11 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       if (events.length === 1 && events[0].kind === "operations") socket.current.send(encodeBinaryOperationEvent(events[0]));
       else socket.current.send(JSON.stringify(batch));
     }
-    else void postFallback(events).catch(() => setStatus("offline"));
-  }, [enabled, postFallback, roomId]);
+    // WebSocket delivery provides low latency; the bounded HTTP outbox makes
+    // every operation durable and gives reconnecting peers a replay source.
+    // Event IDs make the two persistence paths idempotent.
+    queuePersistence(events);
+  }, [enabled, queuePersistence, roomId]);
 
   const heartbeat = useCallback(() => {
     if (!clientId.current || !enabled) return;
