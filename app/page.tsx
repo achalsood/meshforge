@@ -399,6 +399,7 @@ export default function Home() {
       applyRepository(result);
       setNewBranchName("");
       setBranchMenuOpen(false);
+      setHistoryOpen(false);
       flash(`Created and switched to ${result.branch}`);
     } catch (cause) {
       setRepositoryError(cause instanceof Error ? cause.message : "Branch could not be created");

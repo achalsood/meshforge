@@ -152,6 +152,6 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
       await expect(contributorPage.locator(".pull-form").getByRole("button", { name: "Open pull request" })).toBeDisabled();
     });
   } finally {
-    await Promise.all([ownerContext.close(), contributorContext.close()]);
+    await Promise.allSettled([ownerContext.close(), contributorContext.close()]);
   }
 });
