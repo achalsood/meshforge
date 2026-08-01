@@ -8,7 +8,7 @@ import {
   operationPayload,
   operationsFromPayload,
 } from "./binary-codec";
-import type { ChatPayload, PresenceRecord, RealtimeBatch, ReplayResponse, RoomEvent } from "./protocol";
+import type { ChatPayload, PresenceRecord, RealtimeAck, RealtimeBatch, ReplayResponse, RoomEvent } from "./protocol";
 import { ReplicatedText } from "./rga";
 
 type SyncStatus = "connecting" | "live" | "recovering" | "offline";
@@ -30,6 +30,7 @@ interface RoomSyncAccess {
 }
 
 const COLORS = ["mint", "coral", "violet", "lilac"];
+const MAX_PERSISTENCE_ATTEMPTS = 3;
 
 function createClientId(): string {
   const bytes = new Uint8Array(6);
@@ -51,6 +52,8 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const [jsonBytesAvoided, setJsonBytesAvoided] = useState(0);
   const [tombstones, setTombstones] = useState(0);
   const [compactedTombstones, setCompactedTombstones] = useState(0);
+  const [websocketDeliveries, setWebsocketDeliveries] = useState(0);
+  const [acknowledgedEvents, setAcknowledgedEvents] = useState(0);
   const [selfId, setSelfId] = useState("");
   const initialTextRef = useRef(initialText);
   const replica = useRef(ReplicatedText.fromText(initialText));
@@ -64,6 +67,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     key: string;
     events: RoomEvent[];
     post: (events: RoomEvent[]) => Promise<void>;
+    attempt: number;
   }>>([]);
   const persistenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const selection = useRef({ from: 0, to: 0 });
@@ -133,7 +137,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     const key = `${roomId}?${repositoryQuery}`;
     const tail = persistenceQueue.current.at(-1);
     if (tail?.key === key && tail.events.length + events.length <= 100) tail.events.push(...events);
-    else persistenceQueue.current.push({ key, events: [...events], post: postFallback });
+    else persistenceQueue.current.push({ key, events: [...events], post: postFallback, attempt: 1 });
     if (persistenceTimer.current) return;
 
     const drain = async () => {
@@ -142,12 +146,19 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
         persistenceTimer.current = null;
         return;
       }
+      let delay = persistenceQueue.current.length ? 0 : 40;
       try {
         await batch.post(batch.events);
       } catch {
-        setStatus("offline");
+        if (batch.attempt < MAX_PERSISTENCE_ATTEMPTS) {
+          batch.attempt += 1;
+          persistenceQueue.current.unshift(batch);
+          delay = 250 * 2 ** (batch.attempt - 2);
+        } else if (socket.current?.readyState !== WebSocket.OPEN) {
+          setStatus("offline");
+        }
       }
-      persistenceTimer.current = setTimeout(() => void drain(), persistenceQueue.current.length ? 0 : 40);
+      persistenceTimer.current = setTimeout(() => void drain(), delay);
     };
 
     persistenceTimer.current = setTimeout(() => void drain(), 40);
@@ -206,6 +217,8 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       setJsonBytesAvoided(0);
       setTombstones(0);
       setCompactedTombstones(0);
+      setWebsocketDeliveries(0);
+      setAcknowledgedEvents(0);
       setSelfId(clientId.current);
     });
 
@@ -238,10 +251,21 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
         try {
           if (message.data instanceof ArrayBuffer) {
             processEvents([decodeBinaryOperationEvent(new Uint8Array(message.data))]);
+            setWebsocketDeliveries((count) => count + 1);
             return;
           }
-          const data = JSON.parse(String(message.data)) as RealtimeBatch | { type: string };
-          if (data.type === "batch") processEvents((data as RealtimeBatch).events);
+          const data = JSON.parse(String(message.data)) as RealtimeBatch | RealtimeAck | { type: string };
+          if (data.type === "batch") {
+            const events = (data as RealtimeBatch).events;
+            processEvents(events);
+            setWebsocketDeliveries((count) => count + events.length);
+          } else if (data.type === "ack") {
+            const ack = data as RealtimeAck;
+            if (ack.roomId === roomId && Array.isArray(ack.eventIds)) {
+              setAcknowledgedEvents((count) => count + ack.eventIds.length);
+              setLatency(Math.max(1, Date.now() - ack.acceptedAt));
+            }
+          }
         } catch { /* malformed peer messages are ignored */ }
       });
       ws.addEventListener("close", () => {
@@ -319,6 +343,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
 
   return {
     text, status, presence, chats, latency, appliedOperations, binaryBytesSent,
-    jsonBytesAvoided, tombstones, compactedTombstones, selfId, edit, updateSelection, sendChat,
+    jsonBytesAvoided, tombstones, compactedTombstones, websocketDeliveries,
+    acknowledgedEvents, selfId, edit, updateSelection, sendChat,
   };
 }

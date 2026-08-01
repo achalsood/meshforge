@@ -44,6 +44,13 @@ export interface RealtimeBatch {
   events: RoomEvent[];
 }
 
+export interface RealtimeAck {
+  type: "ack";
+  roomId: string;
+  eventIds: string[];
+  acceptedAt: number;
+}
+
 export type WebRTCSignal =
   | { kind: "ready" }
   | { kind: "description"; description: RTCSessionDescriptionInit }

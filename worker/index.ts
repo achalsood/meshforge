@@ -1,12 +1,13 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import type { RealtimeBatch, RealtimeSignal } from "../lib/collaboration/protocol";
+import type { RealtimeAck, RealtimeBatch, RoomEvent } from "../lib/collaboration/protocol";
 import {
-  decodeBinaryOperationEvent,
+  encodeBinaryOperationEvent,
   operationPayload,
   operationsFromPayload,
 } from "../lib/collaboration/binary-codec";
+import { decodeRealtimeFrame } from "../lib/collaboration/realtime-transport";
 import { roomSlug } from "../lib/collaboration/room-id";
 import { isRealtimeSignalPacket } from "../lib/collaboration/signaling";
 import { hasRepositoryPermission } from "../lib/auth/permissions";
@@ -88,7 +89,43 @@ function sanitizeRealtimeEvents(events: RealtimeBatch["events"], user: Authentic
   });
 }
 
-function acceptRealtimeSocket(request: Request, env: Env, roomId: string, user: AuthenticatedUser, canCollaborate: boolean): Response {
+function sendSocket(socket: WebSocket, data: string | ArrayBuffer | ArrayBufferView): boolean {
+  if (socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function broadcastRoom(sockets: Set<WebSocket>, sender: WebSocket, data: string | ArrayBuffer | ArrayBufferView): void {
+  for (const peer of sockets) {
+    if (peer === sender) continue;
+    if (!sendSocket(peer, data)) sockets.delete(peer);
+  }
+}
+
+function acknowledge(socket: WebSocket, roomId: string, events: RoomEvent[]): void {
+  const packet: RealtimeAck = {
+    type: "ack",
+    roomId,
+    eventIds: events.map((event) => event.eventId),
+    acceptedAt: Date.now(),
+  };
+  sendSocket(socket, JSON.stringify(packet));
+}
+
+function persistAcceptedEvents(ctx: ExecutionContext, env: Env, roomId: string, events: RoomEvent[]): void {
+  const persistence = persistRoomEvents(env.DB, roomId, events).catch(() => undefined);
+  try {
+    ctx.waitUntil(persistence);
+  } catch {
+    void persistence;
+  }
+}
+
+function acceptRealtimeSocket(request: Request, env: Env, ctx: ExecutionContext, roomId: string, user: AuthenticatedUser, canCollaborate: boolean): Response {
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
@@ -99,42 +136,33 @@ function acceptRealtimeSocket(request: Request, env: Env, roomId: string, user: 
   liveRooms.set(roomId, sockets);
   server.send(JSON.stringify({ type: "ready", roomId }));
 
-  server.addEventListener("message", async (message) => {
+  server.addEventListener("message", (message) => {
     try {
-      if (message.data instanceof ArrayBuffer) {
-        if (!canCollaborate || message.data.byteLength > 256_000) return;
-        const events = sanitizeRealtimeEvents(
-          [decodeBinaryOperationEvent(new Uint8Array(message.data))],
-          user,
-          canCollaborate,
-        );
+      const frame = decodeRealtimeFrame(message.data);
+      if (frame.encoding === "binary") {
+        if (!canCollaborate) return;
+        const events = sanitizeRealtimeEvents([frame.event], user, canCollaborate);
         if (!events.length) return;
-        await persistRoomEvents(env.DB, roomId, events);
-        for (const peer of sockets) {
-          if (peer !== server && peer.readyState === WebSocket.OPEN) peer.send(message.data);
-        }
+        acknowledge(server, roomId, events);
+        broadcastRoom(sockets, server, encodeBinaryOperationEvent(events[0]));
+        persistAcceptedEvents(ctx, env, roomId, events);
         return;
       }
-      if (typeof message.data !== "string" || message.data.length > 256_000) return;
-      const packet = JSON.parse(message.data) as RealtimeBatch | RealtimeSignal;
+      const packet = frame.packet;
       if (packet.roomId !== roomId) return;
       if (packet.type === "batch") {
-        if (!Array.isArray(packet.events)) return;
         const events = sanitizeRealtimeEvents(packet.events, user, canCollaborate);
         if (!events.length) return;
         const serialized = JSON.stringify({ ...packet, events });
-        await persistRoomEvents(env.DB, roomId, events);
-        for (const peer of sockets) {
-          if (peer !== server && peer.readyState === WebSocket.OPEN) peer.send(serialized);
-        }
+        acknowledge(server, roomId, events);
+        broadcastRoom(sockets, server, serialized);
+        persistAcceptedEvents(ctx, env, roomId, events);
         return;
       } else if (packet.type !== "signal" || !packet.signal || !packet.clientId) return;
       if (!canCollaborate) return;
-      for (const peer of sockets) {
-        if (peer !== server && peer.readyState === WebSocket.OPEN) peer.send(message.data);
-      }
+      broadcastRoom(sockets, server, JSON.stringify(packet));
     } catch {
-      server.send(JSON.stringify({ type: "error", message: "Invalid realtime message" }));
+      sendSocket(server, JSON.stringify({ type: "error", message: "Invalid realtime message" }));
     }
   });
 
@@ -388,7 +416,7 @@ const worker = {
           const { owner, name } = repositoryCoordinates(request);
           assertRoomContext(request, roomMatch[1], owner, name);
           const { role } = await requireRepositoryPermission(env.DB, owner, name, user, "read");
-          return acceptRealtimeSocket(request, env, roomMatch[1], user, hasRepositoryPermission(role, "chat") && hasRepositoryPermission(role, "commit"));
+          return acceptRealtimeSocket(request, env, ctx, roomMatch[1], user, hasRepositoryPermission(role, "chat") && hasRepositoryPermission(role, "commit"));
         }
 
         const eventMatch = url.pathname.match(/^\/api\/rooms\/([a-z0-9][a-z0-9-]{0,63})\/events$/i);

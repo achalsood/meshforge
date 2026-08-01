@@ -32,6 +32,19 @@ async function expectEditorsConverged(pageA: Page, pageB: Page, fragments: strin
   }, { timeout: 20_000, message: "both replicas should converge on the same source" }).toBe(true);
 }
 
+async function blockReplayDelivery(page: Page): Promise<void> {
+  await page.route("**/api/rooms/**/events?*", async (route) => {
+    if (route.request().method() === "GET") await route.abort("blockedbyclient");
+    else await route.continue();
+  });
+}
+
+async function expectRealtimeValue(page: Page, fragment: string): Promise<void> {
+  const startedAt = Date.now();
+  await expect(page.getByLabel("Collaborative code editor")).toHaveValue(new RegExp(fragment), { timeout: 500 });
+  expect(Date.now() - startedAt, `WebSocket delivery of ${fragment} should take less than 500ms`).toBeLessThan(500);
+}
+
 test("two users collaborate, review, merge, and enforce a viewer downgrade", async ({ browser }, testInfo) => {
   const suffix = `${Date.now().toString(36)}-${testInfo.workerIndex}`;
   const owner: TestUser = { displayName: "E2E Owner", email: `owner-${suffix}@meshforge.test` };
@@ -79,17 +92,20 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
 
       const ownerEditor = ownerPage.getByLabel("Collaborative code editor");
       const contributorEditor = contributorPage.getByLabel("Collaborative code editor");
+      await Promise.all([blockReplayDelivery(ownerPage), blockReplayDelivery(contributorPage)]);
       const initialSource = await ownerEditor.inputValue();
       await ownerEditor.fill(`${initialSource}\n${ownerChange}`);
-      await expect(contributorEditor).toHaveValue(new RegExp(ownerChange));
+      await expectRealtimeValue(contributorPage, ownerChange);
       await contributorEditor.fill(`${await contributorEditor.inputValue()}\n${contributorChange}`);
+      await expectRealtimeValue(ownerPage, contributorChange);
       await expectEditorsConverged(ownerPage, contributorPage, [ownerChange, contributorChange]);
+      await expect(contributorPage.getByLabel(/WebSocket deliveries/)).toHaveAttribute("aria-label", /^[1-9]\d* WebSocket deliveries/);
     });
 
     await test.step("chat is delivered to the other authenticated user", async () => {
       await ownerPage.getByLabel("Message the room").fill(chatMessage);
       await ownerPage.getByLabel("Send message").click();
-      await expect(contributorPage.locator(".message p", { hasText: chatMessage })).toBeVisible();
+      await expect(contributorPage.locator(".message p", { hasText: chatMessage })).toBeVisible({ timeout: 500 });
     });
 
     await test.step("contributor commits, creates a branch, and opens a pull request", async () => {
