@@ -5,19 +5,23 @@ import { ActionsDrawer } from "@/components/workspace/actions-drawer";
 import { CollaborationPanel } from "@/components/workspace/collaboration-panel";
 import { FileTree } from "@/components/workspace/file-tree";
 import { Icon } from "@/components/workspace/icon";
+import { HistoryDrawer } from "@/components/workspace/history-drawer";
+import { IntelligenceDrawer } from "@/components/workspace/intelligence-drawer";
 import { IssuesDrawer } from "@/components/workspace/issues-drawer";
+import { PullRequestsDrawer } from "@/components/workspace/pull-requests-drawer";
 import { TeamDrawer } from "@/components/workspace/team-drawer";
 import { TelemetryFooter } from "@/components/workspace/telemetry-footer";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
 import { roomSlug } from "@/lib/collaboration/room-id";
 import { chatGPTSignInUrl, chatGPTSignOutUrl, chatGPTSwitchUserUrl } from "@/lib/auth/navigation";
-import type { RepositoryPermission, RepositoryRole } from "@/lib/auth/permissions";
-import type { RepositoryMember, SessionPayload, TeamPayload } from "@/lib/auth/types";
-import type { AnalysisFinding, RepositoryAnalysis } from "@/lib/intelligence/repository-analyzer";
+import type { RepositoryPermission } from "@/lib/auth/permissions";
+import type { SessionPayload } from "@/lib/auth/types";
 import type { RepositorySnapshot } from "@/lib/repository/types";
 import { useRepositoryActions } from "@/lib/workspace/use-repository-actions";
 import { useRepositoryIssues } from "@/lib/workspace/use-repository-issues";
+import { useMeshAnalysis } from "@/lib/workspace/use-mesh-analysis";
+import { useRepositoryTeam } from "@/lib/workspace/use-repository-team";
 import { buildFileTree } from "@/lib/workspace/build-file-tree";
 
 const INITIAL_CODE = `import { cosineSim, L2Distance } from "../utils/distance";
@@ -64,20 +68,7 @@ export default function Home() {
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [newRepositoryName, setNewRepositoryName] = useState("");
   const [creatingRepository, setCreatingRepository] = useState(false);
-  const [teamOpen, setTeamOpen] = useState(false);
-  const [team, setTeam] = useState<TeamPayload | null>(null);
-  const [teamLoading, setTeamLoading] = useState(false);
-  const [teamError, setTeamError] = useState("");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<Exclude<RepositoryRole, "owner">>("contributor");
-  const [teamMutation, setTeamMutation] = useState(false);
   const [draft, setDraft] = useState("");
-  const [aiOpen, setAiOpen] = useState(false);
-  const [analysis, setAnalysis] = useState<RepositoryAnalysis | null>(null);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysisError, setAnalysisError] = useState("");
-  const [analysisTab, setAnalysisTab] = useState<"findings" | "hotspots" | "graph" | "algorithms">("findings");
-  const [selectedFindingId, setSelectedFindingId] = useState("");
   const [activeNav, setActiveNav] = useState("Code");
   const [activeFile, setActiveFile] = useState("src/retrieval/hnsw.ts");
   const [toast, setToast] = useState("");
@@ -133,7 +124,6 @@ export default function Home() {
   const actualPeers = Math.max(1, sync.presence.length);
   const pullHeadBranch = prHeadBranch || repository?.branches.find((branch) => !branch.isDefault)?.name || "";
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
-  const selectedFinding = analysis?.findings.find((finding) => finding.id === selectedFindingId) ?? analysis?.findings[0];
 
   useEffect(() => {
     let cancelled = false;
@@ -197,6 +187,20 @@ export default function Home() {
     setActiveFile(path);
   }
 
+  const intelligence = useMeshAnalysis({
+    repository,
+    files: workingSnapshot,
+    activeFile,
+    editActiveFile: sync.edit,
+    openFile,
+    updateFile: (path, content) => setWorkingFiles((current) => ({ ...current, [path]: content })),
+    onBeforeOpen: () => {
+      setHistoryOpen(false);
+      setActiveNav("Code");
+    },
+    onFlash: flash,
+  });
+
   async function createCommit(event: FormEvent) {
     event.preventDefault();
     if (!repository || !dirtyPaths.size || committing) return;
@@ -226,8 +230,7 @@ export default function Home() {
     setRepository(snapshot);
     setWorkingFiles({});
     setRepositoryError("");
-    setTeam(null);
-    setTeamOpen(false);
+    team.reset();
     setActiveFile((current) => snapshot.files.some((file) => file.path === current) ? current : snapshot.files[0]?.path ?? current);
   }
 
@@ -251,6 +254,15 @@ export default function Home() {
     }
   }
 
+  const team = useRepositoryTeam({
+    repository,
+    session,
+    setSession,
+    selectRepository,
+    onRepositoryError: setRepositoryError,
+    onFlash: flash,
+  });
+
   async function createRepository(event: FormEvent) {
     event.preventDefault();
     if (!newRepositoryName.trim() || creatingRepository) return;
@@ -272,87 +284,6 @@ export default function Home() {
       setRepositoryError(cause instanceof Error ? cause.message : "Repository could not be created");
     } finally {
       setCreatingRepository(false);
-    }
-  }
-
-  async function openTeam() {
-    if (!repository) return;
-    setTeamOpen(true);
-    setTeamLoading(true);
-    setTeamError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members`, { cache: "no-store" });
-      const result = await response.json() as TeamPayload | { error: string };
-      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository team could not be loaded");
-      setTeam(result);
-    } catch (cause) {
-      setTeamError(cause instanceof Error ? cause.message : "Repository team could not be loaded");
-    } finally {
-      setTeamLoading(false);
-    }
-  }
-
-  async function inviteMember(event: FormEvent) {
-    event.preventDefault();
-    if (!repository || !inviteEmail.trim() || teamMutation) return;
-    setTeamMutation(true);
-    setTeamError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: inviteEmail, role: inviteRole }),
-      });
-      const result = await response.json() as TeamPayload | { error: string };
-      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Invitation could not be sent");
-      setTeam(result);
-      setInviteEmail("");
-      flash(`Invited ${inviteEmail.trim().toLowerCase()} as ${inviteRole}`);
-    } catch (cause) {
-      setTeamError(cause instanceof Error ? cause.message : "Invitation could not be sent");
-    } finally {
-      setTeamMutation(false);
-    }
-  }
-
-  async function respondToInvitation(invitationId: number, accept: boolean) {
-    if (teamMutation) return;
-    setTeamMutation(true);
-    setRepositoryError("");
-    try {
-      const response = await fetch(`/api/invitations/${invitationId}`, {
-        method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accept }),
-      });
-      const result = await response.json() as SessionPayload | { error: string };
-      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Invitation could not be updated");
-      const invitation = session?.invitations.find((candidate) => candidate.id === invitationId);
-      setSession(result);
-      if (accept && invitation) await selectRepository(invitation.owner, invitation.repositoryName);
-      flash(accept ? "Repository invitation accepted" : "Repository invitation declined");
-    } catch (cause) {
-      setRepositoryError(cause instanceof Error ? cause.message : "Invitation could not be updated");
-    } finally {
-      setTeamMutation(false);
-    }
-  }
-
-  async function changeMember(member: RepositoryMember, role: RepositoryRole | null) {
-    if (!repository || teamMutation) return;
-    setTeamMutation(true);
-    setTeamError("");
-    try {
-      const response = await fetch(`/api/repos/${repository.owner}/${repository.name}/members/${member.userId}`, {
-        method: role ? "PATCH" : "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: role ? JSON.stringify({ role }) : undefined,
-      });
-      const result = await response.json() as TeamPayload | { error: string };
-      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Member could not be updated");
-      setTeam(result);
-      flash(role ? `${member.displayName} is now ${role}` : `${member.displayName} was removed`);
-    } catch (cause) {
-      setTeamError(cause instanceof Error ? cause.message : "Member could not be updated");
-    } finally {
-      setTeamMutation(false);
     }
   }
 
@@ -449,62 +380,6 @@ export default function Home() {
     }
   }
 
-  async function runMeshAnalysis() {
-    if (!repository || analyzing) return;
-    setAnalyzing(true);
-    setAnalysisError("");
-    try {
-      const response = await fetch("/api/intelligence/analyze", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files: workingSnapshot }),
-      });
-      const result = await response.json() as RepositoryAnalysis | { error: string };
-      if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Analysis failed");
-      setAnalysis(result);
-      setSelectedFindingId(result.findings[0]?.id ?? "");
-    } catch (cause) {
-      setAnalysisError(cause instanceof Error ? cause.message : "Analysis failed");
-    } finally {
-      setAnalyzing(false);
-    }
-  }
-
-  async function openMeshAI() {
-    setAiOpen(true);
-    setHistoryOpen(false);
-    setActiveNav("Code");
-    if (!analysis && repository) await runMeshAnalysis();
-  }
-
-  useEffect(() => {
-    const shortcut = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        void openMeshAI();
-      }
-    };
-    window.addEventListener("keydown", shortcut);
-    return () => window.removeEventListener("keydown", shortcut);
-  });
-
-  function applySuggestion(finding: AnalysisFinding) {
-    if (!finding.patch) return;
-    const file = workingSnapshot.find((candidate) => candidate.path === finding.patch?.path);
-    if (!file || !file.content.includes(finding.patch.before)) {
-      setAnalysisError("The file changed after analysis. Run the review again before applying this patch.");
-      return;
-    }
-    const next = file.content.replace(finding.patch.before, finding.patch.after);
-    if (file.path === activeFile) sync.edit(next);
-    else {
-      setWorkingFiles((current) => ({ ...current, [file.path]: next }));
-      setActiveFile(file.path);
-    }
-    setAnalysis(null);
-    setSelectedFindingId("");
-    setAiOpen(false);
-    flash(`Applied Mesh AI patch to ${file.path}`);
-  }
-
   function sendMessage(event: FormEvent) {
     event.preventDefault();
     const body = draft.trim();
@@ -531,7 +406,7 @@ export default function Home() {
         <span className="brand-mark large"><span /></span>
         <h1>{session.invitations.length ? "You’ve been invited" : "Create your first repository"}</h1>
         <p>{session.invitations.length ? "Accept a repository invitation or start a new workspace of your own." : "Your workspace is ready. Start a repository to unlock source control, issues, actions, and live collaboration."}</p>
-        {!!session.invitations.length && <div className="empty-invitations">{session.invitations.map((invitation) => <article key={invitation.id}><div><strong>{invitation.owner}/{invitation.repositoryName}</strong><span>{invitation.role} · invited by {invitation.invitedBy}</span></div><button onClick={() => void respondToInvitation(invitation.id, true)} disabled={teamMutation}>Accept</button><button onClick={() => void respondToInvitation(invitation.id, false)} disabled={teamMutation}>Decline</button></article>)}</div>}
+        {!!session.invitations.length && <div className="empty-invitations">{session.invitations.map((invitation) => <article key={invitation.id}><div><strong>{invitation.owner}/{invitation.repositoryName}</strong><span>{invitation.role} · invited by {invitation.invitedBy}</span></div><button onClick={() => void team.respondToInvitation(invitation.id, true)} disabled={team.mutating}>Accept</button><button onClick={() => void team.respondToInvitation(invitation.id, false)} disabled={team.mutating}>Decline</button></article>)}</div>}
         <form onSubmit={createRepository}><input value={newRepositoryName} onChange={(event) => setNewRepositoryName(event.target.value)} placeholder="my-project" aria-label="Repository name" autoFocus/><button disabled={!newRepositoryName.trim() || creatingRepository}>{creatingRepository ? "Creating…" : "Create repository"}</button></form>
         {repositoryError && <span className="empty-error">{repositoryError}</span>}
       </section>}
@@ -543,7 +418,7 @@ export default function Home() {
             <header><div><strong>Your repositories</strong><span>{session?.repositories.length ?? 0} available</span></div><span className="user-role">{currentAccess?.role ?? "signed in"}</span></header>
             <div className="repo-menu-list">{session?.repositories.map((item) => <button key={`${item.owner}/${item.name}`} className={item.owner === repository?.owner && item.name === repository?.name ? "active" : ""} onClick={() => void selectRepository(item.owner, item.name)}><span className="repo-cube">◇</span><div><strong>{item.owner}/{item.name}</strong><small>{item.role} · {item.defaultBranch}</small></div>{item.owner === repository?.owner && item.name === repository?.name && <Icon name="check" size={14}/>}</button>)}</div>
             <form onSubmit={createRepository}><input value={newRepositoryName} onChange={(event) => setNewRepositoryName(event.target.value)} placeholder="new-repository" aria-label="New repository name"/><button disabled={!newRepositoryName.trim() || creatingRepository}><Icon name="plus" size={14}/>{creatingRepository ? "Creating…" : "Create"}</button></form>
-            {!!session?.invitations.length && <section className="pending-invites"><strong>Pending invitations</strong>{session.invitations.map((invitation) => <article key={invitation.id}><div><span>{invitation.owner}/{invitation.repositoryName}</span><small>{invitation.role} · from {invitation.invitedBy}</small></div><button onClick={() => void respondToInvitation(invitation.id, true)} disabled={teamMutation}>Accept</button><button onClick={() => void respondToInvitation(invitation.id, false)} disabled={teamMutation}>Decline</button></article>)}</section>}
+            {!!session?.invitations.length && <section className="pending-invites"><strong>Pending invitations</strong>{session.invitations.map((invitation) => <article key={invitation.id}><div><span>{invitation.owner}/{invitation.repositoryName}</span><small>{invitation.role} · from {invitation.invitedBy}</small></div><button onClick={() => void team.respondToInvitation(invitation.id, true)} disabled={team.mutating}>Accept</button><button onClick={() => void team.respondToInvitation(invitation.id, false)} disabled={team.mutating}>Decline</button></article>)}</section>}
           </div>}
         </div>
         <div className="branch-control">
@@ -555,7 +430,7 @@ export default function Home() {
           </div>}
         </div>
         <nav className="nav-tabs" aria-label="Repository navigation">
-          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => { setActiveNav(item); setBranchMenuOpen(false); setHistoryOpen(false); setAiOpen(false); }}>{item}{item === "Issues" && openIssues > 0 && <span className="nav-count">{openIssues}</span>}{item === "Pull requests" && openPulls > 0 && <span className="nav-count">{openPulls}</span>}{item === "Actions" && workflowRuns[0]?.status === "failure" && <span className="nav-count alert">!</span>}</button>)}
+          {["Code", "Issues", "Pull requests", "Actions"].map((item) => <button key={item} className={activeNav === item ? "active" : ""} onClick={() => { setActiveNav(item); setBranchMenuOpen(false); setHistoryOpen(false); intelligence.close(); }}>{item}{item === "Issues" && openIssues > 0 && <span className="nav-count">{openIssues}</span>}{item === "Pull requests" && openPulls > 0 && <span className="nav-count">{openPulls}</span>}{item === "Actions" && workflowRuns[0]?.status === "failure" && <span className="nav-count alert">!</span>}</button>)}
         </nav>
         <div className="top-presence" aria-label={`${actualPeers} realtime peers online`}>
           {(sync.presence.length ? sync.presence : [{ clientId: "local", name: "You", color: "mint" }]).slice(0, 4).map((person) => <span className={`avatar sm ${person.color}`} key={person.clientId}>{person.name.slice(0, 2).toUpperCase()}<i /></span>)}
@@ -570,7 +445,7 @@ export default function Home() {
             <a href={chatGPTSignOutUrl()} role="menuitem"><Icon name="phone" size={15}/><div><strong>Sign out</strong><span>End this MeshForge session</span></div></a>
           </div>}
         </div>
-        <button className="share-button" onClick={() => void openTeam()} disabled={!repository}><Icon name="share" /><span>{can("invite") ? "Invite team" : "View team"}</span></button>
+        <button className="share-button" onClick={() => void team.show()} disabled={!repository}><Icon name="share" /><span>{can("invite") ? "Invite team" : "View team"}</span></button>
       </header>
 
       <section className="workspace">
@@ -606,54 +481,25 @@ export default function Home() {
             </div>
             <div className="minimap" aria-hidden="true">{Array.from({length: 38}).map((_, i) => <i key={i} style={{width: `${28 + ((i * 17) % 58)}%`}} />)}<span /></div>
           </div>
-          <button className="ai-fab" onClick={() => aiOpen ? setAiOpen(false) : void openMeshAI()} aria-expanded={aiOpen}><Icon name="sparkles"/><span>Mesh Intelligence</span><kbd>⌘ K</kbd></button>
-          {aiOpen && <aside className="intelligence-drawer" aria-label="Mesh Intelligence repository review">
-            <header><div><span className="ai-glyph"><Icon name="sparkles"/></span><div><strong>Mesh Intelligence</strong><span>Local repository analysis · no external APIs</span></div></div><div><button className="rerun-analysis" onClick={() => void runMeshAnalysis()} disabled={analyzing}>{analyzing ? "Analyzing…" : "Run again"}</button><button className="close-intelligence" onClick={() => setAiOpen(false)} aria-label="Close Mesh Intelligence">×</button></div></header>
-            {analysisError && <div className="analysis-error" role="alert">{analysisError}</div>}
-            {analyzing && !analysis ? <div className="analysis-loading"><Icon name="activity" size={25}/><strong>Indexing repository…</strong><span>Building dependency graph, rolling hashes, and risk heap</span><i/></div> : analysis && <>
-              <section className="analysis-summary"><div className="health-score"><strong>{analysis.summary.score}</strong><span>health score</span></div><div className={analysis.summary.syntaxErrors ? "syntax-total alert" : "syntax-total"}><strong>{analysis.summary.syntaxErrors}</strong><span>syntax errors</span></div><div><strong>{analysis.summary.findings}</strong><span>findings</span></div><div><strong>{analysis.summary.files}</strong><span>files</span></div><div><strong>{analysis.summary.lines}</strong><span>lines</span></div><div><strong>{analysis.summary.dependencyEdges}</strong><span>edges</span></div><div><strong>{analysis.summary.duplicateBlocks}</strong><span>duplicates</span></div></section>
-              <nav className="analysis-tabs" aria-label="Analysis sections">{(["findings", "hotspots", "graph", "algorithms"] as const).map((tab) => <button key={tab} className={analysisTab === tab ? "active" : ""} onClick={() => setAnalysisTab(tab)}>{tab}</button>)}</nav>
-              <div className="analysis-body">
-                {analysisTab === "findings" && <div className="findings-layout"><div className="finding-list">{analysis.findings.length ? analysis.findings.map((finding) => <button key={finding.id} className={selectedFinding?.id === finding.id ? "active" : ""} onClick={() => setSelectedFindingId(finding.id)}><span className={`severity ${finding.severity}`}>{finding.severity}</span><div><strong>{finding.title}</strong><code>{finding.path}:{finding.line}:{finding.column}</code></div><em>{finding.category}</em></button>) : <div className="clean-analysis"><Icon name="check" size={25}/><strong>No actionable risks found</strong><span>The repository passed every active rule.</span></div>}</div>{selectedFinding && <article className="finding-detail"><header><span className={`severity ${selectedFinding.severity}`}>{selectedFinding.severity}</span><span>{selectedFinding.category}</span></header><h3>{selectedFinding.title}</h3><p>{selectedFinding.explanation}</p><label>Evidence</label><pre><code>{selectedFinding.evidence}</code></pre><label>Recommendation</label><p>{selectedFinding.suggestion}</p><div className="finding-location"><Icon name="file" size={14}/><code>{selectedFinding.path}:{selectedFinding.line}:{selectedFinding.column}</code><button onClick={() => { openFile(selectedFinding.path); setAiOpen(false); }}>Open file</button></div>{selectedFinding.patch && <button className="apply-patch" onClick={() => applySuggestion(selectedFinding)}><Icon name="sparkles" size={15}/>Apply deterministic patch</button>}</article>}</div>}
-                {analysisTab === "hotspots" && <div className="hotspot-list">{analysis.hotspots.map((hotspot, index) => <button key={hotspot.path} onClick={() => { openFile(hotspot.path); setAiOpen(false); }}><strong>#{index + 1}</strong><div><span>{hotspot.path}</span><i style={{width: `${Math.min(100, hotspot.risk)}%`}}/></div><code>C{hotspot.complexity} · {hotspot.lines} lines · {hotspot.imports} imports</code></button>)}</div>}
-                {analysisTab === "graph" && <div className="dependency-list"><header><span>Source</span><span>Dependency</span><span>Type</span></header>{analysis.dependencies.length ? analysis.dependencies.map((edge) => <div key={`${edge.from}-${edge.to}`}><code>{edge.from}</code><code>{edge.to}</code><span className={edge.external ? "external" : "internal"}>{edge.external ? "package" : "internal"}</span></div>) : <div className="empty-analysis">No import edges found.</div>}</div>}
-                {analysisTab === "algorithms" && <div className="algorithm-grid">{analysis.algorithms.map((algorithm) => <article key={algorithm.name}><Icon name="activity" size={18}/><div><strong>{algorithm.name}</strong><p>{algorithm.purpose}</p></div><code>{algorithm.complexity}</code></article>)}</div>}
-              </div>
-              <footer className="analysis-footer"><span>Runs inside MeshForge</span><span>Source never leaves your deployment</span><span>{new Date(analysis.generatedAt).toLocaleTimeString()}</span></footer>
-            </>}
-          </aside>}
-          {historyOpen && <aside className="history-drawer" aria-label="Commit history">
-            <header><div><Icon name="git"/><div><strong>Commit history</strong><span>{repository?.branch ?? "main"} · immutable DAG</span></div></div><button onClick={() => setHistoryOpen(false)} aria-label="Close history">×</button></header>
-            <div className="history-list">{repository?.history.map((commit, index) => <article key={commit.oid} className={index === 0 ? "head" : ""}>
-              <div className="commit-node"><i/><span/></div><div className="commit-body"><div><strong>{commit.message}</strong>{index === 0 && <em>HEAD</em>}{commit.secondParentOid && <em className="merge-label">MERGE</em>}</div><p>{commit.author} · {new Date(commit.createdAt).toLocaleString()}</p><code>{commit.shortOid}</code><span className="diff-total">+{commit.insertions} −{commit.deletions}</span>
-              {commit.diffs.length > 0 && <details><summary>{commit.filesChanged} {commit.filesChanged === 1 ? "file" : "files"} changed</summary>{commit.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
-              </div></article>)}</div>
-            <footer><span>{repository?.metrics.objectCount ?? 0} objects</span><span>{repository?.metrics.deduplicatedBytes ?? 0} bytes deduplicated</span></footer>
-          </aside>}
-          {activeNav === "Pull requests" && <aside className="pull-drawer" aria-label="Pull requests">
-            <header><div><Icon name="git"/><div><strong>Pull requests</strong><span>Review snapshots and merge guarded changes</span></div></div><button onClick={() => setActiveNav("Code")} aria-label="Close pull requests">×</button></header>
-            <div className="pull-content">
-              <form className="pull-form" onSubmit={createPullRequest}>
-                <div><strong>Open a pull request</strong><span>Compare a feature branch against {repository?.defaultBranch ?? "main"}</span></div>
-                <label><span>Head branch</span><select value={pullHeadBranch} onChange={(event) => setPrHeadBranch(event.target.value)} disabled={!can("pull_request") || !repository?.branches.some((branch) => !branch.isDefault)}><option value="">Create a feature branch first</option>{repository?.branches.filter((branch) => !branch.isDefault).map((branch) => <option value={branch.name} key={branch.name}>{branch.name} · {branch.shortOid}</option>)}</select></label>
-                <label><span>Title</span><input value={prTitle} onChange={(event) => setPrTitle(event.target.value)} placeholder="Describe the change" maxLength={160} disabled={!can("pull_request")}/></label>
-                <label><span>Description</span><textarea value={prBody} onChange={(event) => setPrBody(event.target.value)} placeholder="What changed, and why?" maxLength={2000} disabled={!can("pull_request")}/></label>
-                <button disabled={!pullHeadBranch || creatingPull || !can("pull_request")}>{creatingPull ? "Opening…" : "Open pull request"}</button>
-                {!can("pull_request") && <p className="permission-note">Contributor access is required to open pull requests.</p>}
-              </form>
-              <section className="pull-list">
-                <div className="pull-list-title"><strong>Repository activity</strong><span>{repository?.pullRequests.length ?? 0} total</span></div>
-                {repository?.pullRequests.length ? repository.pullRequests.map((pull) => <article className={`pull-card ${pull.status}`} key={pull.number}>
-                  <div className="pull-card-top"><span className={`pull-status ${pull.status}`}>{pull.status}</span><code>#{pull.number}</code><span>{pull.headBranch}</span><b>→</b><span>{pull.baseBranch}</span></div>
-                  <h3>{pull.title}</h3>{pull.body && <p>{pull.body}</p>}
-                  <div className="pull-meta"><span>{pull.author} · {new Date(pull.createdAt).toLocaleString()}</span><strong>{pull.filesChanged} files</strong><em>+{pull.insertions} −{pull.deletions}</em></div>
-                  {pull.diffs.length > 0 && <details><summary>View changed files</summary>{pull.diffs.map((diff) => <div className="diff-file" key={diff.path}><span>{diff.status[0].toUpperCase()}</span><code>{diff.path}</code><b>+{diff.insertions} −{diff.deletions}</b></div>)}</details>}
-                  {pull.status === "open" && <footer><span>{can("merge") ? pull.mergeable ? "Base is unchanged · ready to merge" : "Base moved · rebase required" : "Maintainer access is required to merge"}</span><button disabled={!pull.mergeable || mergingNumber !== null || !can("merge")} onClick={() => void mergePullRequest(pull.number)}>{mergingNumber === pull.number ? "Merging…" : "Merge pull request"}</button></footer>}
-                  {pull.status === "merged" && <footer className="merged-footer"><span>Merged {pull.mergedAt ? new Date(pull.mergedAt).toLocaleString() : ""}</span><code>{pull.mergeCommitOid?.slice(0, 8)}</code></footer>}
-                </article>) : <div className="empty-pulls"><Icon name="branch" size={30}/><strong>No pull requests yet</strong><span>Create a feature branch, commit a change, then open your first review.</span></div>}
-              </section>
-            </div>
-          </aside>}
+          <button className="ai-fab" onClick={intelligence.toggle} aria-expanded={intelligence.open}><Icon name="sparkles"/><span>Mesh Intelligence</span><kbd>⌘ K</kbd></button>
+          {intelligence.open && <IntelligenceDrawer controller={intelligence}/>}
+          {historyOpen && <HistoryDrawer repository={repository} onClose={() => setHistoryOpen(false)}/>}
+          {activeNav === "Pull requests" && <PullRequestsDrawer
+            body={prBody}
+            canCreate={can("pull_request")}
+            canMerge={can("merge")}
+            creating={creatingPull}
+            headBranch={pullHeadBranch}
+            mergingNumber={mergingNumber}
+            repository={repository}
+            title={prTitle}
+            onChangeBody={setPrBody}
+            onChangeHeadBranch={setPrHeadBranch}
+            onChangeTitle={setPrTitle}
+            onClose={() => setActiveNav("Code")}
+            onCreate={createPullRequest}
+            onMerge={(number) => void mergePullRequest(number)}
+          />}
           {activeNav === "Issues" && <IssuesDrawer
             canManage={can("issues")}
             error={issueError}
@@ -690,22 +536,22 @@ export default function Home() {
             onRefresh={() => void loadActions()}
             onRun={() => void runWorkflow()}
           />}
-          {teamOpen && <TeamDrawer
+          {team.open && <TeamDrawer
             canInvite={can("invite")}
             canManageMembers={can("manage_members")}
             currentRole={currentAccess?.role}
-            error={teamError}
-            inviteEmail={inviteEmail}
-            inviteRole={inviteRole}
-            loading={teamLoading}
-            mutating={teamMutation}
+            error={team.error}
+            inviteEmail={team.inviteEmail}
+            inviteRole={team.inviteRole}
+            loading={team.loading}
+            mutating={team.mutating}
             repository={repository}
-            team={team}
-            onChangeInviteEmail={setInviteEmail}
-            onChangeInviteRole={setInviteRole}
-            onChangeMember={(member, role) => void changeMember(member, role)}
-            onClose={() => setTeamOpen(false)}
-            onInvite={inviteMember}
+            team={team.team}
+            onChangeInviteEmail={team.setInviteEmail}
+            onChangeInviteRole={team.setInviteRole}
+            onChangeMember={(member, role) => void team.changeMember(member, role)}
+            onClose={team.close}
+            onInvite={team.invite}
           />}
         </section>
 
