@@ -1,9 +1,8 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ActionsDrawer } from "@/components/workspace/actions-drawer";
 import { CollaborationPanel } from "@/components/workspace/collaboration-panel";
-import { Icon } from "@/components/workspace/icon";
 import { IssuesDrawer } from "@/components/workspace/issues-drawer";
 import { PullRequestsDrawer } from "@/components/workspace/pull-requests-drawer";
 import { TeamDrawer } from "@/components/workspace/team-drawer";
@@ -11,9 +10,6 @@ import { TelemetryFooter } from "@/components/workspace/telemetry-footer";
 import { WorkspaceAccessGates } from "@/components/workspace/workspace-access-gates";
 import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { WorkspaceHeader, type WorkspaceNav } from "@/components/workspace/workspace-header";
-import { useRoomSync } from "@/lib/collaboration/use-room-sync";
-import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
-import { roomSlug } from "@/lib/collaboration/room-id";
 import type { RepositoryPermission } from "@/lib/auth/permissions";
 import { useRepositoryActions } from "@/lib/workspace/use-repository-actions";
 import { useRepositoryIssues } from "@/lib/workspace/use-repository-issues";
@@ -21,7 +17,10 @@ import { useMeshAnalysis } from "@/lib/workspace/use-mesh-analysis";
 import { useRepositoryTeam } from "@/lib/workspace/use-repository-team";
 import { useSourceControl } from "@/lib/workspace/use-source-control";
 import { useWorkspaceSession } from "@/lib/workspace/use-workspace-session";
+import { useWorkspaceCollaboration } from "@/lib/workspace/use-workspace-collaboration";
+import { useWorkspaceNotifications } from "@/lib/workspace/use-workspace-notifications";
 import { buildFileTree } from "@/lib/workspace/build-file-tree";
+import { WorkspaceToast } from "@/components/workspace/workspace-toast";
 
 const INITIAL_CODE = `import { cosineSim, L2Distance } from "../utils/distance";
 import { MaxHeap } from "../utils/heap";
@@ -59,11 +58,9 @@ export class HNSWIndex {
 }`;
 
 export default function Home() {
-  const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
-  const [draft, setDraft] = useState("");
   const [activeNav, setActiveNav] = useState<WorkspaceNav>("Code");
-  const [toast, setToast] = useState("");
   const [workingFiles, setWorkingFiles] = useState<Record<string, string>>({});
+  const { flash, toast } = useWorkspaceNotifications();
   const workspace = useWorkspaceSession("src/retrieval/hnsw.ts");
   const {
     activeFile, authState, repository, session, setActiveFile, setRepository, setSession,
@@ -80,40 +77,19 @@ export default function Home() {
   const currentAccess = session?.repositories.find((candidate) => candidate.owner === repository?.owner && candidate.name === repository?.name);
   const can = (permission: RepositoryPermission) => currentAccess?.permissions.includes(permission) ?? false;
   const activeContent = workingFiles[activeFile] ?? repository?.files.find((file) => file.path === activeFile)?.content ?? INITIAL_CODE;
-  const sync = useRoomSync(roomSlug(`${repository?.owner ?? "none"}:${repository?.name ?? "none"}:${repository?.branch ?? "main"}:${activeFile}`), activeContent, {
-    owner: repository?.owner ?? "",
-    repository: repository?.name ?? "",
-    scope: `${repository?.branch ?? "main"}:${activeFile}`,
-    displayName: session?.user.displayName ?? "Signed-in user",
-    initials: session?.user.initials ?? "MF",
-    canWrite: can("commit") && can("chat"),
-    enabled: authState === "ready" && Boolean(repository),
+  const collaboration = useWorkspaceCollaboration({
+    activeContent,
+    activeFile,
+    authState,
+    canAudio: can("audio"),
+    canChat: can("chat"),
+    canCommit: can("commit"),
+    repository,
+    session,
   });
-  const audio = useAudioRoom(roomSlug(`${repository?.owner ?? "none"}:${repository?.name ?? "none"}:audio`), sync.selfId, sync.presence, {
-    owner: repository?.owner ?? "",
-    repository: repository?.name ?? "",
-    scope: "audio",
-    enabled: can("audio"),
-  });
+  const { actualPeers, sync } = collaboration;
   const tree = useMemo(() => buildFileTree(repository?.files.map((file) => file.path) ?? [activeFile]), [activeFile, repository]);
-  const messages = sync.chats.map((message) => ({
-      who: message.name,
-      initials: message.initials,
-      color: message.color,
-      time: new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      body: message.body,
-    }));
-  const actualPeers = Math.max(1, sync.presence.length);
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
-
-  useEffect(() => {
-    if (!deviceMenuOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDeviceMenuOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [deviceMenuOpen]);
 
   const source = useSourceControl({
     setSession,
@@ -150,19 +126,6 @@ export default function Home() {
     },
     onFlash: flash,
   });
-
-  function sendMessage(event: FormEvent) {
-    event.preventDefault();
-    const body = draft.trim();
-    if (!body || !can("chat")) return;
-    sync.sendChat(body);
-    setDraft("");
-  }
-
-  function flash(message: string) {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 2400);
-  }
 
   return (
     <main className="app-shell">
@@ -272,24 +235,11 @@ export default function Home() {
           />}
         </WorkspaceEditor>
 
-        <CollaborationPanel
-          actualPeers={actualPeers}
-          audio={audio}
-          canAudio={can("audio")}
-          canChat={can("chat")}
-          deviceMenuOpen={deviceMenuOpen}
-          draft={draft}
-          messages={messages}
-          sync={sync}
-          onChangeDraft={setDraft}
-          onFlash={flash}
-          onSendMessage={sendMessage}
-          onSetDeviceMenuOpen={setDeviceMenuOpen}
-        />
+        <CollaborationPanel controller={collaboration} onFlash={flash}/>
       </section>
 
       <TelemetryFooter actualPeers={actualPeers} sync={sync} onShowDetails={() => flash("Binary CRDT v1 · durable replay · causal-safe tombstone compaction")}/>
-      {toast && <div className="toast"><Icon name="check" size={16}/>{toast}</div>}
+      <WorkspaceToast message={toast}/>
     </main>
   );
 }

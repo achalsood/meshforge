@@ -1,39 +1,18 @@
-import type { FormEventHandler } from "react";
-import type { useAudioRoom } from "@/lib/collaboration/use-audio-room";
-import type { useRoomSync } from "@/lib/collaboration/use-room-sync";
+import type { useWorkspaceCollaboration } from "@/lib/workspace/use-workspace-collaboration";
 import { Icon } from "./icon";
 
-type AudioRoom = ReturnType<typeof useAudioRoom>;
-type RoomSync = ReturnType<typeof useRoomSync>;
-
-interface ChatMessage {
-  body: string;
-  color: string;
-  initials: string;
-  time: string;
-  who: string;
-}
+type CollaborationController = ReturnType<typeof useWorkspaceCollaboration>;
 
 interface CollaborationPanelProps {
-  actualPeers: number;
-  audio: AudioRoom;
-  canAudio: boolean;
-  canChat: boolean;
-  deviceMenuOpen: boolean;
-  draft: string;
-  messages: ChatMessage[];
-  sync: RoomSync;
-  onChangeDraft: (value: string) => void;
+  controller: CollaborationController;
   onFlash: (message: string) => void;
-  onSendMessage: FormEventHandler<HTMLFormElement>;
-  onSetDeviceMenuOpen: (open: boolean) => void;
 }
 
-export function CollaborationPanel(props: CollaborationPanelProps) {
+export function CollaborationPanel({ controller, onFlash }: CollaborationPanelProps) {
   const {
     actualPeers, audio, canAudio, canChat, deviceMenuOpen, draft, messages, sync,
-    onChangeDraft, onFlash, onSendMessage, onSetDeviceMenuOpen,
-  } = props;
+    setDeviceMenuOpen, setDraft, sendMessage,
+  } = controller;
   const people = sync.presence.length
     ? sync.presence
     : [{ clientId: sync.selfId || "local", name: "You", color: "mint" }];
@@ -63,13 +42,13 @@ export function CollaborationPanel(props: CollaborationPanelProps) {
         <div className="call-controls-wrap">
           <div className="call-controls">
             <button disabled={audio.status !== "connected" || !canAudio} className={audio.muted ? "active" : ""} onClick={audio.toggleMute} aria-label={audio.muted ? "Unmute microphone" : "Mute microphone"}><Icon name="mic"/></button>
-            <button disabled={!canAudio} className={deviceMenuOpen ? "active" : ""} onClick={() => { onSetDeviceMenuOpen(!deviceMenuOpen); void audio.refreshDevices(); }} aria-label="Choose microphone and speaker" aria-expanded={deviceMenuOpen} aria-haspopup="dialog" aria-controls="audio-device-menu"><Icon name="chevron" size={14}/></button>
+            <button disabled={!canAudio} className={deviceMenuOpen ? "active" : ""} onClick={() => { setDeviceMenuOpen(!deviceMenuOpen); void audio.refreshDevices(); }} aria-label="Choose microphone and speaker" aria-expanded={deviceMenuOpen} aria-haspopup="dialog" aria-controls="audio-device-menu"><Icon name="chevron" size={14}/></button>
             <button className={audio.status === "connected" ? "active connected" : ""} onClick={audio.status === "connected" ? undefined : audio.join} disabled={!canAudio || audio.status === "requesting" || audio.status === "connecting"} aria-label={audio.status === "connected" ? "Audio connected" : "Join audio"}><Icon name="headphones"/></button>
             <button aria-label="Room settings" onClick={() => onFlash("Echo cancellation and noise suppression are enabled")}><Icon name="settings"/></button>
-            <button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={() => { audio.leave(); onSetDeviceMenuOpen(false); }}><Icon name="phone"/></button>
+            <button className="hangup" disabled={audio.status === "idle"} aria-label="Leave audio" onClick={() => { audio.leave(); setDeviceMenuOpen(false); }}><Icon name="phone"/></button>
           </div>
           {deviceMenuOpen && <div className="device-menu" id="audio-device-menu" role="dialog" aria-label="Voice chat devices">
-            <header><div><strong>Voice chat devices</strong><span>{audio.devicesLoading ? "Finding devices…" : "Changes apply immediately"}</span></div><button onClick={() => onSetDeviceMenuOpen(false)} aria-label="Close audio device options">×</button></header>
+            <header><div><strong>Voice chat devices</strong><span>{audio.devicesLoading ? "Finding devices…" : "Changes apply immediately"}</span></div><button onClick={() => setDeviceMenuOpen(false)} aria-label="Close audio device options">×</button></header>
             <label><span>Microphone</span><select value={audio.inputDeviceId} onChange={(event) => void audio.selectInputDevice(event.target.value)} disabled={audio.devicesLoading}><option value="">System default</option>{audio.inputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
             <label><span>Speaker</span><select value={audio.outputDeviceId} onChange={(event) => void audio.selectOutputDevice(event.target.value)} disabled={audio.devicesLoading || !audio.outputSelectionSupported}><option value="">System default</option>{audio.outputDevices.filter((device) => device.deviceId !== "default").map((device) => <option key={device.deviceId} value={device.deviceId}>{device.label}</option>)}</select></label>
             {!audio.outputSelectionSupported && <p>Speaker selection is not supported by this browser. Your system default will be used.</p>}
@@ -82,7 +61,7 @@ export function CollaborationPanel(props: CollaborationPanelProps) {
       <section className="chat-section">
         <p className="section-label">Chat</p>
         <div className="messages">{messages.map((message, index) => <article className="message" key={`${message.time}-${index}`}><span className={`avatar xs ${message.color}`}>{message.initials}</span><div><header><strong>{message.who}</strong><time>{message.time}</time></header><p>{message.body}</p></div></article>)}</div>
-        <form className="composer" onSubmit={onSendMessage}><input value={draft} onChange={(event) => onChangeDraft(event.target.value)} placeholder={canChat ? "Message the room…" : "Chat requires contributor access"} aria-label="Message the room" disabled={!canChat}/><button aria-label="Send message" disabled={!canChat || !draft.trim()}><Icon name="send" size={17}/></button></form>
+        <form className="composer" onSubmit={sendMessage}><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={canChat ? "Message the room…" : "Chat requires contributor access"} aria-label="Message the room" disabled={!canChat}/><button aria-label="Send message" disabled={!canChat || !draft.trim()}><Icon name="send" size={17}/></button></form>
         <small className="composer-help">{canChat ? "Enter to send · synced to everyone" : "Viewer access is read-only"}</small>
       </section>
     </aside>
