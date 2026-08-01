@@ -25,16 +25,21 @@ export function useRepositoryTeam(options: RepositoryTeamOptions) {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Exclude<RepositoryRole, "owner">>("contributor");
   const [mutating, setMutating] = useState(false);
+  const [loadedRepositoryKey, setLoadedRepositoryKey] = useState("");
+  const repositoryKey = repository ? `${repository.owner}/${repository.name}` : "";
 
   function reset() {
     setTeam(null);
     setOpen(false);
     setError("");
+    setLoadedRepositoryKey("");
   }
 
   async function show() {
     if (!repository) return;
     setOpen(true);
+    setLoadedRepositoryKey(repositoryKey);
+    setTeam(null);
     setLoading(true);
     setError("");
     try {
@@ -134,7 +139,7 @@ export function useRepositoryTeam(options: RepositoryTeamOptions) {
     inviteRole,
     loading,
     mutating,
-    open,
+    open: open && loadedRepositoryKey === repositoryKey,
     reset,
     respondToInvitation,
     setInviteEmail,
