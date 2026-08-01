@@ -8,7 +8,10 @@ import {
   operationPayload,
   operationsFromPayload,
 } from "./binary-codec";
-import type { ChatPayload, PresenceRecord, RealtimeAck, RealtimeBatch, ReplayResponse, RoomEvent } from "./protocol";
+import type {
+  ChatPayload, PresenceRecord, RealtimeAck, RealtimeBatch, RealtimeSyncRequest,
+  RealtimeSyncState, ReplayResponse, RoomEvent,
+} from "./protocol";
 import { ReplicatedText } from "./rga";
 
 type SyncStatus = "connecting" | "live" | "recovering" | "offline";
@@ -241,10 +244,21 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       const ws = new WebSocket(`${scheme}//${window.location.host}/api/realtime/${roomId}?${repositoryQuery}`);
       ws.binaryType = "arraybuffer";
       socket.current = ws;
+      const requestSync = () => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const packet: RealtimeSyncRequest = {
+          type: "sync",
+          roomId,
+          clientId: clientId.current,
+          since: latestSeq.current,
+        };
+        ws.send(JSON.stringify(packet));
+      };
       ws.addEventListener("open", () => {
         reconnectAttempt.current = 0;
         setStatus("live");
         heartbeat();
+        requestSync();
         void replay();
       });
       ws.addEventListener("message", (message) => {
@@ -254,7 +268,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
             setWebsocketDeliveries((count) => count + 1);
             return;
           }
-          const data = JSON.parse(String(message.data)) as RealtimeBatch | RealtimeAck | { type: string };
+          const data = JSON.parse(String(message.data)) as RealtimeBatch | RealtimeAck | RealtimeSyncState | { type: string };
           if (data.type === "batch") {
             const events = (data as RealtimeBatch).events;
             processEvents(events);
@@ -264,6 +278,14 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
             if (ack.roomId === roomId && Array.isArray(ack.eventIds)) {
               setAcknowledgedEvents((count) => count + ack.eventIds.length);
               setLatency(Math.max(1, Date.now() - ack.acceptedAt));
+            }
+          } else if (data.type === "sync-state") {
+            const state = data as RealtimeSyncState;
+            if (state.roomId === roomId && Array.isArray(state.events) && Array.isArray(state.presence)) {
+              processEvents(state.events);
+              latestSeq.current = Math.max(latestSeq.current, state.latestSeq);
+              setPresence(state.presence);
+              if (state.events.length) setWebsocketDeliveries((count) => count + state.events.length);
             }
           }
         } catch { /* malformed peer messages are ignored */ }
@@ -276,6 +298,8 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
         reconnectTimer = setTimeout(connect, delay);
       });
       ws.addEventListener("error", () => ws.close());
+      const syncTimer = setInterval(requestSync, 200);
+      ws.addEventListener("close", () => clearInterval(syncTimer), { once: true });
     };
 
     if (!enabled) {

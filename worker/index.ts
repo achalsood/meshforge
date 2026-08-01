@@ -1,9 +1,8 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import type { RealtimeAck, RealtimeBatch, RoomEvent } from "../lib/collaboration/protocol";
+import type { RealtimeAck, RealtimeBatch, RealtimeSyncState, RoomEvent } from "../lib/collaboration/protocol";
 import {
-  encodeBinaryOperationEvent,
   operationPayload,
   operationsFromPayload,
 } from "../lib/collaboration/binary-codec";
@@ -43,8 +42,6 @@ interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
   passThroughOnException(): void;
 }
-
-const liveRooms = new Map<string, Set<WebSocket>>();
 
 function errorResponse(cause: unknown, fallback: string): Response {
   if (cause instanceof AccessError || cause instanceof DomainError) {
@@ -99,13 +96,6 @@ function sendSocket(socket: WebSocket, data: string | ArrayBuffer | ArrayBufferV
   }
 }
 
-function broadcastRoom(sockets: Set<WebSocket>, sender: WebSocket, data: string | ArrayBuffer | ArrayBufferView): void {
-  for (const peer of sockets) {
-    if (peer === sender) continue;
-    if (!sendSocket(peer, data)) sockets.delete(peer);
-  }
-}
-
 function acknowledge(socket: WebSocket, roomId: string, events: RoomEvent[]): void {
   const packet: RealtimeAck = {
     type: "ack",
@@ -131,12 +121,9 @@ function acceptRealtimeSocket(request: Request, env: Env, ctx: ExecutionContext,
   const server = pair[1];
   server.accept();
 
-  const sockets = liveRooms.get(roomId) ?? new Set<WebSocket>();
-  sockets.add(server);
-  liveRooms.set(roomId, sockets);
   server.send(JSON.stringify({ type: "ready", roomId }));
 
-  server.addEventListener("message", (message) => {
+  server.addEventListener("message", async (message) => {
     try {
       const frame = decodeRealtimeFrame(message.data);
       if (frame.encoding === "binary") {
@@ -144,34 +131,29 @@ function acceptRealtimeSocket(request: Request, env: Env, ctx: ExecutionContext,
         const events = sanitizeRealtimeEvents([frame.event], user, canCollaborate);
         if (!events.length) return;
         acknowledge(server, roomId, events);
-        broadcastRoom(sockets, server, encodeBinaryOperationEvent(events[0]));
         persistAcceptedEvents(ctx, env, roomId, events);
         return;
       }
       const packet = frame.packet;
       if (packet.roomId !== roomId) return;
+      if (packet.type === "sync") {
+        const replay = await replayRoom(env.DB, roomId, packet.since);
+        const state: RealtimeSyncState = { type: "sync-state", roomId, ...replay };
+        sendSocket(server, JSON.stringify(state));
+        return;
+      }
       if (packet.type === "batch") {
         const events = sanitizeRealtimeEvents(packet.events, user, canCollaborate);
         if (!events.length) return;
-        const serialized = JSON.stringify({ ...packet, events });
         acknowledge(server, roomId, events);
-        broadcastRoom(sockets, server, serialized);
         persistAcceptedEvents(ctx, env, roomId, events);
         return;
       } else if (packet.type !== "signal" || !packet.signal || !packet.clientId) return;
       if (!canCollaborate) return;
-      broadcastRoom(sockets, server, JSON.stringify(packet));
     } catch {
       sendSocket(server, JSON.stringify({ type: "error", message: "Invalid realtime message" }));
     }
   });
-
-  const remove = () => {
-    sockets.delete(server);
-    if (!sockets.size) liveRooms.delete(roomId);
-  };
-  server.addEventListener("close", remove);
-  server.addEventListener("error", remove);
   return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
 }
 

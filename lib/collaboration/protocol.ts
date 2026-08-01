@@ -51,6 +51,21 @@ export interface RealtimeAck {
   acceptedAt: number;
 }
 
+export interface RealtimeSyncRequest {
+  type: "sync";
+  roomId: string;
+  clientId: string;
+  since: number;
+}
+
+export interface RealtimeSyncState {
+  type: "sync-state";
+  roomId: string;
+  events: RoomEvent[];
+  latestSeq: number;
+  presence: PresenceRecord[];
+}
+
 export type WebRTCSignal =
   | { kind: "ready" }
   | { kind: "description"; description: RTCSessionDescriptionInit }
