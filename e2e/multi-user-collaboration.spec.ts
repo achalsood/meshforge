@@ -96,6 +96,7 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
       await contributorPage.getByLabel("Commit message").fill("Save converged collaboration");
       await contributorPage.getByRole("button", { name: "Commit changes" }).click();
       await expect(contributorPage.getByText(/Committed [a-f0-9]{8} to main/)).toBeVisible();
+      await expect(contributorPage.getByText("Working tree clean")).toBeVisible();
 
       await contributorPage.locator(".branch-pill").click();
       await contributorPage.getByLabel("New branch name").fill(branchName);

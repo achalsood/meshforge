@@ -52,6 +52,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   const [tombstones, setTombstones] = useState(0);
   const [compactedTombstones, setCompactedTombstones] = useState(0);
   const [selfId, setSelfId] = useState("");
+  const initialTextRef = useRef(initialText);
   const replica = useRef(ReplicatedText.fromText(initialText));
   const clientId = useRef("");
   const sequence = useRef(0);
@@ -87,6 +88,10 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       compactionTimer.current = setTimeout(compact, 1_200);
     }
   }, []);
+
+  useEffect(() => {
+    initialTextRef.current = initialText;
+  }, [initialText]);
 
   const processEvents = useCallback((events: RoomEvent[]) => {
     let documentChanged = false;
@@ -179,7 +184,12 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
   }, [displayName, enabled, sendEvents]);
 
   useEffect(() => {
-    replica.current = ReplicatedText.fromText(initialText);
+    // A commit changes the repository baseline while this room stays active.
+    // Keep the live replica in that case: rebuilding it from the committed text
+    // and replaying this room's history would apply the same operations twice.
+    // Room changes still initialize from the latest render's repository text.
+    const roomInitialText = initialTextRef.current;
+    replica.current = ReplicatedText.fromText(roomInitialText);
     seenEvents.current.clear();
     latestSeq.current = 0;
     sequence.current = 0;
@@ -188,7 +198,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     queueMicrotask(() => {
       if (cancelled) return;
-      setText(initialText);
+      setText(roomInitialText);
       setPresence([]);
       setChats([]);
       setAppliedOperations(0);
@@ -262,7 +272,7 @@ export function useRoomSync(roomId: string, initialText: string, access: RoomSyn
       if (compactionTimer.current) clearTimeout(compactionTimer.current);
       socket.current?.close();
     };
-  }, [enabled, heartbeat, initialText, processEvents, repositoryQuery, roomId]);
+  }, [enabled, heartbeat, processEvents, repositoryQuery, roomId]);
 
   const edit = useCallback((nextText: string) => {
     if (!canWrite) return;
