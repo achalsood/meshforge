@@ -3,27 +3,24 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { ActionsDrawer } from "@/components/workspace/actions-drawer";
 import { CollaborationPanel } from "@/components/workspace/collaboration-panel";
-import { FileTree } from "@/components/workspace/file-tree";
 import { Icon } from "@/components/workspace/icon";
-import { HistoryDrawer } from "@/components/workspace/history-drawer";
-import { IntelligenceDrawer } from "@/components/workspace/intelligence-drawer";
 import { IssuesDrawer } from "@/components/workspace/issues-drawer";
 import { PullRequestsDrawer } from "@/components/workspace/pull-requests-drawer";
 import { TeamDrawer } from "@/components/workspace/team-drawer";
 import { TelemetryFooter } from "@/components/workspace/telemetry-footer";
+import { WorkspaceAccessGates } from "@/components/workspace/workspace-access-gates";
+import { WorkspaceEditor } from "@/components/workspace/workspace-editor";
 import { WorkspaceHeader, type WorkspaceNav } from "@/components/workspace/workspace-header";
 import { useRoomSync } from "@/lib/collaboration/use-room-sync";
 import { useAudioRoom } from "@/lib/collaboration/use-audio-room";
 import { roomSlug } from "@/lib/collaboration/room-id";
-import { chatGPTSignInUrl } from "@/lib/auth/navigation";
 import type { RepositoryPermission } from "@/lib/auth/permissions";
-import type { SessionPayload } from "@/lib/auth/types";
-import type { RepositorySnapshot } from "@/lib/repository/types";
 import { useRepositoryActions } from "@/lib/workspace/use-repository-actions";
 import { useRepositoryIssues } from "@/lib/workspace/use-repository-issues";
 import { useMeshAnalysis } from "@/lib/workspace/use-mesh-analysis";
 import { useRepositoryTeam } from "@/lib/workspace/use-repository-team";
 import { useSourceControl } from "@/lib/workspace/use-source-control";
+import { useWorkspaceSession } from "@/lib/workspace/use-workspace-session";
 import { buildFileTree } from "@/lib/workspace/build-file-tree";
 
 const INITIAL_CODE = `import { cosineSim, L2Distance } from "../utils/distance";
@@ -62,16 +59,15 @@ export class HNSWIndex {
 }`;
 
 export default function Home() {
-  const [session, setSession] = useState<SessionPayload | null>(null);
-  const [authState, setAuthState] = useState<"loading" | "ready" | "required" | "error">("loading");
-  const [authError, setAuthError] = useState("");
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [activeNav, setActiveNav] = useState<WorkspaceNav>("Code");
-  const [activeFile, setActiveFile] = useState("src/retrieval/hnsw.ts");
   const [toast, setToast] = useState("");
-  const [repository, setRepository] = useState<RepositorySnapshot | null>(null);
   const [workingFiles, setWorkingFiles] = useState<Record<string, string>>({});
+  const workspace = useWorkspaceSession("src/retrieval/hnsw.ts");
+  const {
+    activeFile, authState, repository, session, setActiveFile, setRepository, setSession,
+  } = workspace;
   const {
     addIssueComment, changeIssueStatus, createIssue, filteredIssues, issueBody,
     issueComment, issueError, issueFilter, issueLabels, issueMutation, issues,
@@ -109,38 +105,6 @@ export default function Home() {
     }));
   const actualPeers = Math.max(1, sync.presence.length);
   const openPulls = repository?.pullRequests.filter((pull) => pull.status === "open").length ?? 0;
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetch("/api/session", { cache: "no-store" })
-      .then(async (response) => {
-        if (response.status === 401) {
-          if (!cancelled) setAuthState("required");
-          return null;
-        }
-        if (!response.ok) throw new Error("Your MeshForge workspace could not be loaded");
-        return response.json() as Promise<SessionPayload>;
-      })
-      .then(async (nextSession) => {
-        if (cancelled || !nextSession) return;
-        setSession(nextSession);
-        setAuthState("ready");
-        const first = nextSession.repositories[0];
-        if (!first) return;
-        const response = await fetch(`/api/repos/${first.owner}/${first.name}`, { cache: "no-store" });
-        const result = await response.json() as RepositorySnapshot | { error: string };
-        if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Repository could not be loaded");
-        if (cancelled) return;
-        setRepository(result);
-        setActiveFile((current) => result.files.some((file) => file.path === current) ? current : result.files[0]?.path ?? current);
-      })
-      .catch((cause) => {
-        if (cancelled) return;
-        setAuthState("error");
-        setAuthError(cause instanceof Error ? cause.message : "Your MeshForge workspace could not be loaded");
-      });
-    return () => { cancelled = true; };
-  }, []);
 
   useEffect(() => {
     if (!deviceMenuOpen) return;
@@ -202,21 +166,7 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      {authState !== "ready" && <section className="auth-gate" aria-live="polite">
-        <span className="brand-mark large"><span /></span>
-        <h1>{authState === "required" ? "Sign in to MeshForge" : authState === "error" ? "Workspace unavailable" : "Opening your workspace…"}</h1>
-        <p>{authState === "required" ? "Use your ChatGPT identity to access repositories, collaboration rooms, and attributed source history." : authState === "error" ? authError : "Resolving your repositories and permissions."}</p>
-        {authState === "required" && <a href={chatGPTSignInUrl()}>Sign in with ChatGPT</a>}
-        {authState === "error" && <button onClick={() => window.location.reload()}>Try again</button>}
-      </section>}
-      {authState === "ready" && session && !repository && <section className="auth-gate empty-workspace">
-        <span className="brand-mark large"><span /></span>
-        <h1>{session.invitations.length ? "You’ve been invited" : "Create your first repository"}</h1>
-        <p>{session.invitations.length ? "Accept a repository invitation or start a new workspace of your own." : "Your workspace is ready. Start a repository to unlock source control, issues, actions, and live collaboration."}</p>
-        {!!session.invitations.length && <div className="empty-invitations">{session.invitations.map((invitation) => <article key={invitation.id}><div><strong>{invitation.owner}/{invitation.repositoryName}</strong><span>{invitation.role} · invited by {invitation.invitedBy}</span></div><button onClick={() => void team.respondToInvitation(invitation.id, true)} disabled={team.mutating}>Accept</button><button onClick={() => void team.respondToInvitation(invitation.id, false)} disabled={team.mutating}>Decline</button></article>)}</div>}
-        <form onSubmit={source.createRepository}><input value={source.newRepositoryName} onChange={(event) => source.setNewRepositoryName(event.target.value)} placeholder="my-project" aria-label="Repository name" autoFocus/><button disabled={!source.newRepositoryName.trim() || source.creatingRepository}>{source.creatingRepository ? "Creating…" : "Create repository"}</button></form>
-        {source.error && <span className="empty-error">{source.error}</span>}
-      </section>}
+      <WorkspaceAccessGates workspace={workspace} source={source} team={team}/>
       <WorkspaceHeader
         activeNav={activeNav}
         actualPeers={actualPeers}
@@ -242,41 +192,15 @@ export default function Home() {
       />
 
       <section className="workspace">
-        <aside className="explorer panel">
-          <div className="panel-heading"><span>Explorer</span><button aria-label="Collapse explorer">↤</button></div>
-          <div className="repo-row"><strong>{repository ? `${repository.owner}/${repository.name}` : "No repository selected"}</strong><Icon name="chevron" size={14} /><button aria-label="Repository options"><Icon name="more" /></button></div>
-          <FileTree activeFile={activeFile} dirtyPaths={source.dirtyPaths} items={tree} onOpenFile={source.openFile}/>
-          <div className="explorer-foot"><Icon name="branch" size={14} /><span>{source.dirtyPaths.size} working {source.dirtyPaths.size === 1 ? "change" : "changes"}</span><span>{repository?.metrics.uniqueBlobCount ?? 0} blobs</span></div>
-        </aside>
-
-        <section className="editor panel">
-          <div className="editor-tabs"><button className="file-tab active"><span className="ts-icon">TS</span><span>{activeFile.split("/").at(-1)}</span>{source.dirtyPaths.has(activeFile) && <i>●</i>}<b>×</b></button><button className="icon-button" aria-label="New file"><Icon name="plus" size={16} /></button><span className="spacer"/><button className="history-button" onClick={source.toggleHistory}><Icon name="git" size={15}/>{repository?.headOid.slice(0, 8) ?? "loading"}</button><button className="icon-button" aria-label="Search"><Icon name="search" /></button><button className="icon-button" aria-label="Split editor"><Icon name="panel" /></button><button className="icon-button" aria-label="More editor options"><Icon name="more" /></button></div>
-          <div className="breadcrumbs">{activeFile.split("/").map((part, index, parts) => <span key={`${part}-${index}`} className={index === parts.length - 1 ? "crumb-current" : ""}>{part}{index < parts.length - 1 && <b>/</b>}</span>)}<span className={`sync-note ${sync.status}`}><Icon name={sync.status === "live" ? "check" : "radio"} size={13}/> {sync.status === "live" ? "Live · WebSocket" : sync.status}</span></div>
-          <form className="repo-toolbar" onSubmit={source.createCommit}>
-            <div><Icon name="git" size={15}/><span>{source.dirtyPaths.size ? `${source.dirtyPaths.size} modified ${source.dirtyPaths.size === 1 ? "file" : "files"}` : "Working tree clean"}</span></div>
-            <input value={source.commitMessage} onChange={(event) => source.setCommitMessage(event.target.value)} placeholder={can("commit") ? "Commit message" : "Read-only repository"} aria-label="Commit message" maxLength={160} disabled={!can("commit")}/>
-            <button disabled={!source.dirtyPaths.size || source.committing || !can("commit")}>{source.committing ? "Committing…" : "Commit changes"}</button>
-          </form>
-          {source.error && <div className="repository-error" role="alert">{source.error}</div>}
-          <div className="code-wrap">
-            <div className="code-pane live-code-pane">
-              <div className="live-line-numbers" aria-hidden="true">{sync.text.split("\n").map((_, index) => <span key={index}>{index + 1}</span>)}</div>
-              <textarea
-                className="live-editor"
-                aria-label="Collaborative code editor"
-                value={sync.text}
-                onChange={(event) => sync.edit(event.target.value)}
-                onSelect={(event) => sync.updateSelection(event.currentTarget.selectionStart, event.currentTarget.selectionEnd)}
-                readOnly={!can("commit")}
-                spellCheck={false}
-              />
-              <div className="remote-cursor-list" aria-label="Live peer cursors">{sync.presence.filter((peer) => peer.cursorFrom !== peer.cursorTo || peer.clientId).slice(0, 3).map((peer) => <span className={peer.color} key={peer.clientId}>{peer.name}<i>{peer.cursorFrom}</i></span>)}</div>
-            </div>
-            <div className="minimap" aria-hidden="true">{Array.from({length: 38}).map((_, i) => <i key={i} style={{width: `${28 + ((i * 17) % 58)}%`}} />)}<span /></div>
-          </div>
-          <button className="ai-fab" onClick={intelligence.toggle} aria-expanded={intelligence.open}><Icon name="sparkles"/><span>Mesh Intelligence</span><kbd>⌘ K</kbd></button>
-          {intelligence.open && <IntelligenceDrawer controller={intelligence}/>}
-          {source.historyOpen && <HistoryDrawer repository={repository} onClose={source.closeHistory}/>}
+        <WorkspaceEditor
+          activeFile={activeFile}
+          canCommit={can("commit")}
+          intelligence={intelligence}
+          repository={repository}
+          source={source}
+          sync={sync}
+          tree={tree}
+        >
           {activeNav === "Pull requests" && <PullRequestsDrawer
             body={source.pullBody}
             canCreate={can("pull_request")}
@@ -346,7 +270,7 @@ export default function Home() {
             onClose={team.close}
             onInvite={team.invite}
           />}
-        </section>
+        </WorkspaceEditor>
 
         <CollaborationPanel
           actualPeers={actualPeers}
