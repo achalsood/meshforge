@@ -81,6 +81,13 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
       await ownerPage.getByLabel("Expand explorer").click();
       await expect(ownerPage.locator(".workspace")).not.toHaveClass(/explorer-collapsed/);
 
+      const audioStateBox = await ownerPage.locator(".room-heading .audio-state").boundingBox();
+      const collapseRoomBox = await ownerPage.getByLabel("Collapse live room").boundingBox();
+      expect(audioStateBox).not.toBeNull();
+      expect(collapseRoomBox).not.toBeNull();
+      expect(collapseRoomBox!.x - (audioStateBox!.x + audioStateBox!.width)).toBeGreaterThanOrEqual(10);
+      expect(collapseRoomBox!.width).toBeGreaterThanOrEqual(32);
+
       await ownerPage.getByLabel("Collapse live room").click();
       await expect(ownerPage.locator(".workspace")).toHaveClass(/room-collapsed/);
       await expect(ownerPage.getByLabel("Expand live room")).toBeVisible();
