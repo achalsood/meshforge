@@ -45,6 +45,13 @@ async function expectRealtimeValue(page: Page, fragment: string): Promise<void> 
   expect(Date.now() - startedAt, `WebSocket delivery of ${fragment} should take less than 500ms`).toBeLessThan(500);
 }
 
+async function expectReadableText(page: Page, selector: string, minimumPixels: number): Promise<void> {
+  const fontSize = await page.locator(selector).first().evaluate((element) =>
+    Number.parseFloat(window.getComputedStyle(element).fontSize),
+  );
+  expect(fontSize).toBeGreaterThanOrEqual(minimumPixels);
+}
+
 test("two users collaborate, review, merge, and enforce a viewer downgrade", async ({ browser }, testInfo) => {
   const suffix = `${Date.now().toString(36)}-${testInfo.workerIndex}`;
   const owner: TestUser = { displayName: "E2E Owner", email: `owner-${suffix}@meshforge.test` };
@@ -67,6 +74,27 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
       await ownerPage.getByLabel("Repository name").fill(repositoryName);
       await ownerPage.getByRole("button", { name: "Create repository" }).click();
       await expect(ownerPage.getByRole("button", { name: new RegExp(repositoryName) }).first()).toBeVisible();
+
+      await ownerPage.getByRole("button", { name: /Account menu/ }).click();
+      await expect(ownerPage.locator("#account-menu")).toBeVisible();
+      await expectReadableText(ownerPage, "#account-menu header strong", 14);
+      await expectReadableText(ownerPage, "#account-menu a span", 11);
+      await ownerPage.getByRole("button", { name: /Account menu/ }).click();
+
+      await ownerPage.getByRole("button", { name: "Issues", exact: true }).click();
+      await expectReadableText(ownerPage, ".issues-drawer > header strong", 17);
+      await expectReadableText(ownerPage, ".issue-create input", 13);
+      await ownerPage.getByLabel("Close issues").click();
+
+      await ownerPage.getByRole("button", { name: "Pull requests", exact: true }).click();
+      await expectReadableText(ownerPage, ".pull-drawer > header strong", 17);
+      await expectReadableText(ownerPage, ".pull-form input", 13);
+      await ownerPage.getByLabel("Close pull requests").click();
+
+      await ownerPage.getByRole("button", { name: "Actions", exact: true }).click();
+      await expectReadableText(ownerPage, ".actions-drawer > header strong", 17);
+      await expectReadableText(ownerPage, ".workflow-sidebar button span", 13);
+      await ownerPage.getByLabel("Close actions").click();
 
       await ownerPage.getByRole("button", { name: "Invite team" }).click();
       const accessDrawer = ownerPage.locator('aside[aria-label="Repository access"]');

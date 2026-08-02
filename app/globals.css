@@ -72,3 +72,117 @@ button { color:inherit; }
 @media (prefers-reduced-motion:reduce) { * { animation:none!important; transition:none!important; } }
 @media (max-width:1100px) { .workspace { grid-template-columns:220px minmax(450px,1fr); }.collab { display:none; }.nav-tabs button { padding:0 9px; }.top-presence,.account-chip>span,.account-chip>svg { display:none; } }
 @media (max-width:760px) { body { overflow:auto; }.app-shell { min-height:100vh; height:auto; grid-template-rows:auto minmax(680px,1fr) auto; }.topbar { min-height:64px; flex-wrap:wrap; padding:10px; }.brand strong { font-size:17px; }.repo-select { min-width:150px; }.repo-menu { left:-90px; width:min(390px,calc(100vw - 20px)); }.branch-control { order:3; }.branch-menu { left:-70px; width:min(360px,calc(100vw - 20px)); }.nav-tabs { order:4; width:100%; height:40px; margin-left:0; overflow:auto; }.share-button { margin-left:auto; width:44px; padding:0; }.share-button span { display:none; }.workspace { grid-template-columns:1fr; }.explorer { display:none; }.editor { min-height:680px; }.code-row { min-width:620px; }.pull-content,.issues-content,.actions-content,.team-content { grid-template-columns:1fr; overflow:auto; }.pull-form,.issue-create,.workflow-sidebar,.team-members { border-right:0; border-bottom:1px solid var(--border); }.pull-list { overflow:visible; }.issue-workspace { grid-template-columns:1fr; }.issue-list { max-height:240px; border-right:0; border-bottom:1px solid var(--border); }.issue-detail { min-height:400px; }.workflow-sidebar { min-height:110px; }.workflow-sidebar footer { display:none; }.workflow-run summary { grid-template-columns:25px minmax(120px,1fr) 70px; }.workflow-run summary time,.workflow-run summary>b { display:none; }.run-steps { padding-left:12px; }.team-members>article { grid-template-columns:40px minmax(120px,1fr) auto; }.team-members>article .remove-member { grid-column:2/4; justify-self:start; }.analysis-summary { grid-template-columns:repeat(3,1fr); }.analysis-summary>div { min-height:54px; }.analysis-summary>div:nth-child(3) { border-right:0; }.findings-layout { grid-template-columns:1fr; height:auto; }.finding-list { max-height:230px; border-right:0; border-bottom:1px solid var(--border); }.algorithm-grid { grid-template-columns:1fr; }.analysis-footer span:nth-child(2) { display:none; }.telemetry { min-height:68px; overflow:auto; }.telemetry>div:nth-child(3),.telemetry>div:nth-child(4),.telemetry .sparkline,.telemetry>button { display:none; }.ai-card { right:12px; width:calc(100% - 24px); }.ai-fab { right:14px; } }
+
+/* Readable account and repository-product surfaces. */
+.account-chip { min-width:118px; height:42px; gap:9px; padding:0 9px; font-size:12px; }
+.account-chip b { width:32px; height:32px; font-size:10px; }
+.account-menu { width:min(360px,calc(100vw - 24px)); padding:14px; border-radius:12px; }
+.account-menu>header { gap:12px; padding:8px 8px 14px; }
+.account-menu>header>b { width:38px; height:38px; font-size:12px; }
+.account-menu>header>div { gap:5px; }
+.account-menu>header strong { font-size:14px; }
+.account-menu>header span { color:#aaa7bc; font-size:12px; }
+.account-menu>a { min-height:64px; gap:13px; margin-top:7px; padding:10px 11px; border-radius:8px; }
+.account-menu>a svg { width:19px; height:19px; }
+.account-menu>a>div { gap:5px; }
+.account-menu>a strong { font-size:13px; }
+.account-menu>a span { color:#9996ab; font-size:11px; line-height:1.4; }
+
+.pull-drawer>header,.product-drawer>header { min-height:70px; padding:12px 20px; }
+.pull-drawer>header strong,.product-drawer>header strong { font-size:17px; }
+.pull-drawer>header span,.product-drawer>header span { font-size:12px; line-height:1.4; }
+.drawer-error { padding:10px 18px; font-size:12px; }
+
+.pull-content { grid-template-columns:minmax(300px,350px) 1fr; }
+.pull-form { gap:15px; padding:21px; }
+.pull-form>div strong { font-size:15px; }
+.pull-form>div span { font-size:12px; line-height:1.5; }
+.pull-form label { gap:8px; font-size:11px; }
+.pull-form input,.pull-form select,.pull-form textarea { padding:11px 12px; font-size:13px; line-height:1.5; }
+.pull-form select { height:42px; }
+.pull-form textarea { min-height:112px; }
+.pull-form>button { height:42px; font-size:13px; }
+.pull-list { padding:21px; }
+.pull-list-title { margin-bottom:14px; }
+.pull-list-title strong { font-size:15px; }
+.pull-list-title span { font-size:11px; }
+.pull-card { margin-bottom:14px; padding:17px; }
+.pull-card-top { gap:9px; font-size:11px; }
+.pull-status { padding:4px 8px; font-size:9px; }
+.pull-card h3 { margin:12px 0 7px; font-size:16px; line-height:1.35; }
+.pull-card>p { margin-bottom:12px; font-size:13px; line-height:1.55; }
+.pull-meta { gap:14px; font-size:11px; line-height:1.4; }
+.pull-card summary { font-size:11px; }
+.pull-card footer { min-height:48px; font-size:11px; line-height:1.45; }
+.pull-card footer button { height:36px; padding:0 12px; font-size:11px; }
+.diff-file { grid-template-columns:20px minmax(0,1fr) auto; gap:8px; margin-top:8px; }
+.diff-file>span,.diff-file code,.diff-file b { font-size:10px; }
+.empty-pulls strong { font-size:14px; }
+.empty-pulls span { max-width:340px; font-size:12px; line-height:1.55; }
+
+.issues-content { grid-template-columns:320px 1fr; }
+.issue-create { gap:16px; padding:21px; }
+.issue-create>div strong { font-size:15px; }
+.issue-create>div span { font-size:12px; line-height:1.5; }
+.issue-create label { gap:8px; font-size:11px; }
+.issue-create input,.issue-create textarea,.comment-form textarea { padding:11px 12px; font-size:13px; line-height:1.55; }
+.issue-create textarea { min-height:132px; }
+.issue-create label small { font-size:10px; }
+.issue-create>button,.comment-form button { height:42px; font-size:13px; }
+.permission-note { font-size:11px!important; line-height:1.5; }
+.issue-toolbar { min-height:52px; padding:8px 14px; }
+.issue-toolbar button { height:34px; padding:0 12px; font-size:12px; }
+.issue-list>button { min-height:92px; grid-template-columns:12px minmax(0,1fr) 26px; gap:11px; padding:15px; }
+.issue-list>button strong { font-size:13px; line-height:1.35; }
+.issue-list>button span { font-size:10px; }
+.issue-list>button em,.issue-labels span { padding:4px 8px; font-size:9px; }
+.issue-list>button>b { font-size:10px; }
+.issue-detail { padding:22px 25px; }
+.issue-detail>header code,.issue-detail>header button { font-size:11px; }
+.issue-state { padding:5px 9px; font-size:9px; }
+.issue-detail h2 { margin:18px 0 12px; font-size:21px; line-height:1.35; }
+.issue-author p { font-size:11px; line-height:1.45; }
+.issue-description { margin:19px 0; padding:16px; font-size:13px; line-height:1.65; }
+.issue-comments h3 { font-size:13px; }
+.issue-comments article header strong { font-size:11px; }
+.issue-comments article header time { font-size:10px; }
+.issue-comments article p { padding:12px; font-size:12px; line-height:1.6; }
+.comment-form { grid-template-columns:1fr 104px; gap:10px; }
+.empty-issues strong,.empty-actions strong { font-size:14px; }
+.empty-issues span,.empty-actions span { max-width:340px; font-size:12px; line-height:1.55; }
+
+.actions-content { grid-template-columns:245px 1fr; }
+.actions-drawer>header button.run-workflow { height:36px; padding:0 12px; font-size:11px; }
+.workflow-sidebar { gap:12px; padding:19px 15px; }
+.workflow-sidebar>strong { font-size:11px; }
+.workflow-sidebar>button { min-height:62px; gap:11px; padding:11px 12px; }
+.workflow-sidebar>button span { font-size:13px; }
+.workflow-sidebar>button small { font-size:11px; line-height:1.4; }
+.workflow-sidebar footer span { font-size:10px; }
+.workflow-sidebar footer code { font-size:11px; }
+.run-list { padding:20px; }
+.run-list>header { margin-bottom:15px; }
+.run-list>header strong { font-size:15px; }
+.run-list>header span { font-size:11px; }
+.run-list>header button { height:34px; padding:0 11px; font-size:11px; }
+.workflow-run { margin-bottom:12px; }
+.workflow-run summary { min-height:72px; grid-template-columns:30px minmax(170px,1fr) 84px 60px 145px; gap:11px; padding:12px 14px; }
+.run-icon { width:25px; height:25px; font-size:13px; }
+.workflow-run summary strong { font-size:13px; }
+.workflow-run summary span,.workflow-run summary code,.workflow-run summary time,.workflow-run summary b { font-size:10px; line-height:1.4; }
+.run-steps { padding:0 14px 15px 54px; }
+.run-steps>article { grid-template-columns:25px 1fr; gap:11px; padding:13px 0; }
+.run-steps>article>span { width:23px; height:23px; font-size:11px; }
+.run-steps article header strong { font-size:12px; }
+.run-steps article header time { font-size:10px; }
+.run-steps pre { margin-top:9px; font-size:11px; line-height:1.65; }
+.empty-actions button { height:36px; padding:0 12px; font-size:11px; }
+
+@media (max-width:760px) {
+  .account-menu { position:fixed; top:72px; right:10px; width:calc(100vw - 20px); }
+  .pull-content,.issues-content,.actions-content { grid-template-columns:1fr; }
+  .pull-form,.issue-create,.workflow-sidebar { border-right:0; border-bottom:1px solid var(--border); }
+  .issue-workspace { grid-template-columns:1fr; }
+  .workflow-run summary { grid-template-columns:30px minmax(130px,1fr) 76px; }
+  .workflow-run summary time,.workflow-run summary>b { display:none; }
+}
