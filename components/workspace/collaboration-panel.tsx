@@ -4,11 +4,13 @@ import { Icon } from "./icon";
 type CollaborationController = ReturnType<typeof useWorkspaceCollaboration>;
 
 interface CollaborationPanelProps {
+  collapsed: boolean;
   controller: CollaborationController;
   onFlash: (message: string) => void;
+  onToggleCollapsed: () => void;
 }
 
-export function CollaborationPanel({ controller, onFlash }: CollaborationPanelProps) {
+export function CollaborationPanel({ collapsed, controller, onFlash, onToggleCollapsed }: CollaborationPanelProps) {
   const {
     actualPeers, audio, canAudio, canChat, deviceMenuOpen, draft, messages, sync,
     setDeviceMenuOpen, setDraft, sendMessage,
@@ -18,13 +20,12 @@ export function CollaborationPanel({ controller, onFlash }: CollaborationPanelPr
     : [{ clientId: sync.selfId || "local", name: "You", color: "mint" }];
 
   return (
-    <aside className="collab panel">
+    <aside className={`collab panel${collapsed ? " collapsed" : ""}`}>
       <div className="room-heading">
-        <div><strong>Live room</strong><span>{actualPeers}</span></div>
-        <span className={`audio-state ${audio.status}`}>{audio.status === "connected" ? `${audio.connectedPeers + 1} on audio` : audio.status === "idle" ? "Audio off" : audio.status}</span>
-        <button aria-label="Room options"><Icon name="more"/></button>
+        {!collapsed && <><div><strong>Live room</strong><span>{actualPeers}</span></div><span className={`audio-state ${audio.status}`}>{audio.status === "connected" ? `${audio.connectedPeers + 1} on audio` : audio.status === "idle" ? "Audio off" : audio.status}</span></>}
+        <button onClick={onToggleCollapsed} aria-label={collapsed ? "Expand live room" : "Collapse live room"} aria-expanded={!collapsed}>{collapsed ? "↤" : "↦"}</button>
       </div>
-      <section className="voice-section">
+      {collapsed ? <><span className="panel-rail-label">Live room</span><span className="panel-rail-count" aria-label={`${actualPeers} realtime peers`}>{actualPeers}</span></> : <><section className="voice-section">
         <div className="voice-title">
           <p className="section-label">Voice · WebRTC</p>
           {audio.status === "idle" || audio.status === "error"
@@ -64,6 +65,7 @@ export function CollaborationPanel({ controller, onFlash }: CollaborationPanelPr
         <form className="composer" onSubmit={sendMessage}><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={canChat ? "Message the room…" : "Chat requires contributor access"} aria-label="Message the room" disabled={!canChat}/><button aria-label="Send message" disabled={!canChat || !draft.trim()}><Icon name="send" size={17}/></button></form>
         <small className="composer-help">{canChat ? "Enter to send · synced to everyone" : "Viewer access is read-only"}</small>
       </section>
+      </>}
     </aside>
   );
 }

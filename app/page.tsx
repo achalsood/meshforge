@@ -19,6 +19,7 @@ import { useSourceControl } from "@/lib/workspace/use-source-control";
 import { useWorkspaceSession } from "@/lib/workspace/use-workspace-session";
 import { useWorkspaceCollaboration } from "@/lib/workspace/use-workspace-collaboration";
 import { useWorkspaceNotifications } from "@/lib/workspace/use-workspace-notifications";
+import { useWorkspacePanels } from "@/lib/workspace/use-workspace-panels";
 import { buildFileTree } from "@/lib/workspace/build-file-tree";
 import { WorkspaceToast } from "@/components/workspace/workspace-toast";
 
@@ -61,6 +62,7 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState<WorkspaceNav>("Code");
   const [workingFiles, setWorkingFiles] = useState<Record<string, string>>({});
   const { flash, toast } = useWorkspaceNotifications();
+  const panels = useWorkspacePanels();
   const workspace = useWorkspaceSession("src/retrieval/hnsw.ts");
   const {
     activeFile, authState, repository, session, setActiveFile, setRepository, setSession,
@@ -154,15 +156,17 @@ export default function Home() {
         onRespondToInvitation={(invitationId, accept) => void team.respondToInvitation(invitationId, accept)}
       />
 
-      <section className="workspace">
+      <section className={`workspace${panels.explorerCollapsed ? " explorer-collapsed" : ""}${panels.roomCollapsed ? " room-collapsed" : ""}`}>
         <WorkspaceEditor
           activeFile={activeFile}
           canCommit={can("commit")}
+          explorerCollapsed={panels.explorerCollapsed}
           intelligence={intelligence}
           repository={repository}
           source={source}
           sync={sync}
           tree={tree}
+          onToggleExplorer={panels.toggleExplorer}
         >
           {activeNav === "Pull requests" && <PullRequestsDrawer
             body={source.pullBody}
@@ -235,7 +239,15 @@ export default function Home() {
           />}
         </WorkspaceEditor>
 
-        <CollaborationPanel controller={collaboration} onFlash={flash}/>
+        <CollaborationPanel
+          collapsed={panels.roomCollapsed}
+          controller={collaboration}
+          onFlash={flash}
+          onToggleCollapsed={() => {
+            if (!panels.roomCollapsed) collaboration.setDeviceMenuOpen(false);
+            panels.toggleRoom();
+          }}
+        />
       </section>
 
       <TelemetryFooter actualPeers={actualPeers} sync={sync} onShowDetails={() => flash("Binary CRDT v1 · durable replay · causal-safe tombstone compaction")}/>

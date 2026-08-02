@@ -17,21 +17,29 @@ interface WorkspaceEditorProps {
   activeFile: string;
   canCommit: boolean;
   children?: ReactNode;
+  explorerCollapsed: boolean;
   intelligence: IntelligenceController;
   repository: RepositorySnapshot | null;
   source: SourceController;
   sync: RoomSyncController;
   tree: TreeItem[];
+  onToggleExplorer: () => void;
 }
 
 export function WorkspaceEditor(props: WorkspaceEditorProps) {
-  const { activeFile, canCommit, children, intelligence, repository, source, sync, tree } = props;
+  const {
+    activeFile, canCommit, children, explorerCollapsed, intelligence, repository,
+    source, sync, tree, onToggleExplorer,
+  } = props;
   return <>
-    <aside className="explorer panel">
-      <div className="panel-heading"><span>Explorer</span><button aria-label="Collapse explorer">↤</button></div>
-      <div className="repo-row"><strong>{repository ? `${repository.owner}/${repository.name}` : "No repository selected"}</strong><Icon name="chevron" size={14}/><button aria-label="Repository options"><Icon name="more"/></button></div>
-      <FileTree activeFile={activeFile} dirtyPaths={source.dirtyPaths} items={tree} onOpenFile={source.openFile}/>
-      <div className="explorer-foot"><Icon name="branch" size={14}/><span>{source.dirtyPaths.size} working {source.dirtyPaths.size === 1 ? "change" : "changes"}</span><span>{repository?.metrics.uniqueBlobCount ?? 0} blobs</span></div>
+    <aside className={`explorer panel${explorerCollapsed ? " collapsed" : ""}`}>
+      <div className="panel-heading">
+        {!explorerCollapsed && <span>Explorer</span>}
+        <button onClick={onToggleExplorer} aria-label={explorerCollapsed ? "Expand explorer" : "Collapse explorer"} aria-expanded={!explorerCollapsed}>{explorerCollapsed ? "↦" : "↤"}</button>
+      </div>
+      {explorerCollapsed
+        ? <span className="panel-rail-label">Explorer</span>
+        : <><div className="repo-row"><strong>{repository ? `${repository.owner}/${repository.name}` : "No repository selected"}</strong><Icon name="chevron" size={14}/><button aria-label="Repository options"><Icon name="more"/></button></div><FileTree activeFile={activeFile} dirtyPaths={source.dirtyPaths} items={tree} onOpenFile={source.openFile}/><div className="explorer-foot"><Icon name="branch" size={14}/><span>{source.dirtyPaths.size} working {source.dirtyPaths.size === 1 ? "change" : "changes"}</span><span>{repository?.metrics.uniqueBlobCount ?? 0} blobs</span></div></>}
     </aside>
 
     <section className="editor panel">

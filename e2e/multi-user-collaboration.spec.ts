@@ -75,6 +75,18 @@ test("two users collaborate, review, merge, and enforce a viewer downgrade", asy
       await ownerPage.getByRole("button", { name: "Create repository" }).click();
       await expect(ownerPage.getByRole("button", { name: new RegExp(repositoryName) }).first()).toBeVisible();
 
+      await ownerPage.getByLabel("Collapse explorer").click();
+      await expect(ownerPage.locator(".workspace")).toHaveClass(/explorer-collapsed/);
+      await expect(ownerPage.getByLabel("Expand explorer")).toBeVisible();
+      await ownerPage.getByLabel("Expand explorer").click();
+      await expect(ownerPage.locator(".workspace")).not.toHaveClass(/explorer-collapsed/);
+
+      await ownerPage.getByLabel("Collapse live room").click();
+      await expect(ownerPage.locator(".workspace")).toHaveClass(/room-collapsed/);
+      await expect(ownerPage.getByLabel("Expand live room")).toBeVisible();
+      await ownerPage.getByLabel("Expand live room").click();
+      await expect(ownerPage.locator(".workspace")).not.toHaveClass(/room-collapsed/);
+
       await ownerPage.getByRole("button", { name: /Account menu/ }).click();
       await expect(ownerPage.locator("#account-menu")).toBeVisible();
       await expectReadableText(ownerPage, "#account-menu header strong", 14);
